@@ -147,5 +147,6 @@ The accepted stack is in `docs/decisions.md`. Do not reopen those choices withou
 - Do not add pandas, a web framework, Redis, Celery, APScheduler, Sentry, or an extra logging framework.
 - Run Ruff lint, Ruff format checks, strict Pyright, and pytest before completion.
 
-The current foundation has no product handlers, models, repositories, services, or report logic.
+The identity phase adds organizations, people, memberships, roles, authorization, and `attendee-setup`.
+No product handlers, attendance models, or report logic exist yet.
 Document future concepts without speculative feature code.

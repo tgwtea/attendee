@@ -20,6 +20,8 @@ The PRD sets these decisions. Change them only through a PRD change.
 | P10 | The attendance series determines the workbook. One series maps to one workbook. | PRD §8, §28 |
 | P11 | Structured persistent storage is the source of truth. | PRD §29 |
 | P12 | XLSX is a report and export format, not primary storage. | PRD §29 |
+| P13 | The attendance percentage denominator counts every completed session. `No Response` adds nothing to the numerator and stays `No Response`. An admin edits the record if the member was present. | PRD §7, §9 (clarified 2026-10-04) |
+| P14 | A reminder that members see shows no counts. Only admins see outstanding counts. | PRD §24, §26 (clarified 2026-10-04) |
 
 ## Accepted technical decisions
 
@@ -47,7 +49,9 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T17 | UTC timestamps; `Asia/Singapore` default | Use standard `datetime` and `zoneinfo`. No third-party datetime library. |
 | T18 | Standard logging and database transactions | Commit before confirmation. Enforce retry idempotency and response uniqueness. No Sentry, Redis, Celery, or logging framework. |
 | T19 | Daily local SQLite backups; retain 14 | Use SQLite backup, persistent storage, host cron, and manual server-side restore. No Telegram restore interface. |
-| T20 | Migration-first container entry point | Stop on migration failure. No domain tables or empty baseline revision in this foundation. |
+| T20 | Migration-first container entry point | Stop on migration failure. No empty baseline revision. The first revision, `0001_identity`, adds the identity tables. |
+| T21 | `attendee-setup --organization <slug> --name <name>` grants bootstrap admins | `BOOTSTRAP_ADMIN_IDS` applies only to the named organization. A rerun creates missing people and memberships and promotes listed members to admin. It never demotes or removes anyone. One transaction covers the whole run. |
+| T22 | Identity schema | A slug is the stable organization key. A Telegram user ID is unique per person and optional. A display name is optional, but a person needs a name or a Telegram ID. Names and handles are never unique. Database `CHECK` constraints limit roles to `member` and `admin`. Timestamps are naive UTC in SQLite; `UTCDateTime` returns aware UTC values. |
 
 ## Foundation defaults
 
@@ -56,18 +60,15 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 - Docker uses the same relative URL from `/app`. Its named volume covers `/app/data`.
 - The backup directory is `./data/backups`. Retention is fixed at 14 completed backups.
 - `TELEGRAM_BOT_TOKEN` is required only for bot startup.
-- Bootstrap admin IDs accept comma-separated values or a JSON array. Empty lists are valid until admin features exist.
+- Bootstrap admin IDs accept comma-separated values or a JSON array. The bot accepts an empty list. `attendee-setup` rejects an empty list.
 - A backup file lock rejects overlapping runs. Failed backup creation never prunes completed backups.
 - SQLite transaction events issue explicit `BEGIN` statements. This also protects schema changes from partial transaction commits.
 - `hatchling` supplies the build backend only. It is not an application runtime dependency.
 
 ## Open product questions for later phases
 
-These questions do not block the infrastructure foundation. Do not settle them through an implementation assumption.
+These questions do not block the identity phase. Do not settle them through an implementation assumption.
 
-1. PRD §7 uses completed sessions as the percentage denominator. PRD §9 uses `Present + Absent`. Define the treatment of `No Response` before attendance calculations.
-2. PRD §24 shows aggregate counts in a public reminder. PRD §6 and §26 restrict aggregate attendance to admins. Resolve this before reminders.
-3. Define the previous response state while a replacement reason remains incomplete (PRD §23).
-4. Define how bootstrap admins receive their initial organization membership. This foundation parses IDs but grants no permissions.
+1. Define the previous response state while a replacement reason remains incomplete (PRD §23).
 
-The stack has no remaining open choices for this task. Schema details belong to the next implementation phase.
+Resolved on 2026-10-04: the percentage denominator (P13), public reminder counts (P14), and bootstrap admin membership (T21).

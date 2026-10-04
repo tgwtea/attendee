@@ -5,6 +5,7 @@ import asyncio
 from alembic import context
 from attendee.config.settings import Settings
 from attendee.logging import configure_logging
+from attendee.persistence import models as _models  # noqa: F401  Register ORM tables.
 from attendee.persistence.base import Base
 from attendee.persistence.database import create_engine
 

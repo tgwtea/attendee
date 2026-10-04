@@ -49,8 +49,10 @@ async def test_foreign_keys_enforced(tmp_path):
         await engine.dispose()
 
 
-def test_metadata_has_no_domain_tables():
-    assert not Base.metadata.tables
+def test_metadata_has_only_identity_tables():
+    from attendee.persistence import models  # noqa: F401
+
+    assert set(Base.metadata.tables) == {"organizations", "people", "memberships"}
 
 
 async def test_schema_transaction_rolls_back(tmp_path):

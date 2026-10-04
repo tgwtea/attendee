@@ -1,6 +1,6 @@
 # Architecture
 
-Status: runnable infrastructure foundation. Product features do not exist yet.
+Status: runnable foundation with organization identity and authorization. Attendance features do not exist yet.
 
 `docs/prd.md` defines the product. `docs/decisions.md` records the accepted stack. `AGENTS.md` defines coding rules.
 
@@ -30,15 +30,34 @@ Future multi-step interactions use `ConversationHandler`. Telegram processes upd
 Future handlers must keep transactions short. Spreadsheet work must not block the event loop.
 Incomplete conversations can reset after restart. Committed attendance data must survive restart.
 
-## Future organization and identity model
+## Organization identity and authorization (implemented)
+
+| Table | Key columns | Constraints |
+| --- | --- | --- |
+| `organizations` | `slug`, `name` | Unique non-empty slug; non-empty name |
+| `people` | `display_name`, `telegram_user_id`, `telegram_handle` | Unique positive Telegram ID; a name or a Telegram ID is required; names and handles are not unique |
+| `memberships` | `organization_id`, `person_id`, `role` | One membership per person per organization; role is `member` or `admin`; restricting foreign keys |
+
+- A global person holds Telegram identity. A person can exist before the Telegram user ID is known.
+- A handle is a changeable attribute. `IdentityService.change_handle` keeps the person and the Telegram ID.
+- The application never merges people by name. Each `create_person` call creates a new person.
+- A membership links a person to an organization and carries the organization-scoped role.
+- `AuthorizationService.require_role` reads only the membership in the requested organization. A missing membership or a lower role raises `AccessDenied`. An admin satisfies a member requirement.
+- `IdentityService` resolves a Telegram user ID to a person. It grants no access. Callers then authorize the person in one organization.
+- Repositories (`repositories/identity.py`) never commit. Each service operation owns one short transaction and returns Pydantic DTOs, not ORM records.
+- `attendee-setup` grants `BOOTSTRAP_ADMIN_IDS` the admin role in one named organization. There is no global admin role.
+
+[ACE LOGIC]
+Every membership links a person to an organization.
+Every membership has a role.
+If a person lacks a membership in an organization then the authorization service denies access to the organization.
+
+## Future organization model
 
 These are design constraints, not implemented models.
 
-- An `Organization` owns its memberships, roles, chats, series, and custom field definitions.
-- A global person holds Telegram identity. The Telegram user ID becomes durable after account matching.
-- Membership links a person to an organization. A person can belong to several organizations.
-- Roles belong to an organization membership. MVP roles are `member` and `admin`.
-- Bootstrap admin IDs come from the environment. This foundation only parses them; it grants no permissions or global admin role.
+- An `Organization` also owns chats, series, and custom field definitions.
+- Account matching binds a Telegram user ID to an imported person (PRD §31). It does not exist yet.
 - An organization can have several Telegram chats.
 - A series belongs to one organization. It can select a default chat.
 - A session can override that chat with another chat from the same organization.
@@ -84,8 +103,9 @@ SQLAlchemy controls explicit transaction starts, including schema changes and sa
 Application operations use short transactions and separate sessions. Do not share an active session between concurrent operations.
 
 Alembic owns schema changes. Its async environment imports the project metadata and shares the engine configuration.
-The metadata contains no domain tables. There is no baseline revision. Alembic may create its own version table.
-Future migrations must import the model modules before Alembic reads the metadata.
+`alembic/env.py` imports `attendee.persistence.models` before it reads the metadata.
+Revision `0001_identity` creates the identity tables. Revisions use plain SQLAlchemy types.
+SQLite stores timestamps as naive UTC. The `UTCDateTime` column type rejects naive input and returns aware UTC values.
 Review generated revisions before deployment. Never use runtime `create_all()`.
 
 Future response updates must commit before Telegram confirms success.
@@ -117,7 +137,7 @@ One series has one logical workbook, reconstructed from its sessions. No spreads
 Settings use Pydantic v2 and `pydantic-settings`. Local `.env` values yield to environment variables.
 The bot requires a token. Backups and migrations do not require one.
 Admin IDs accept comma-separated values or a JSON array of positive integers. The parser removes duplicates.
-This foundation permits an empty admin list because it has no admin operations.
+The bot permits an empty admin list. `attendee-setup` requires at least one ID.
 
 Store timestamps in UTC. Use `datetime` and `zoneinfo`. The default application timezone is `Asia/Singapore`.
 Logs use UTC and standard Python logging. Token values are redacted from bot logs.

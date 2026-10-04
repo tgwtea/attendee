@@ -213,6 +213,8 @@ The system should still retain the **original status** and **reason**, even thou
 
 This prevents information such as `Late` and `Not Coming` from becoming indistinguishable inside the underlying data.
 
+**Clarification (2026-10-04):** The denominator counts every completed session for the member, including a session where the member has `No Response`. A `No Response` session adds nothing to the numerator. The record stays `No Response`; it does not become an absence. If the member was present, an admin edits the record.
+
 ---
 
 # 8. Attendance Series and Spreadsheet Behaviour
@@ -297,7 +299,9 @@ This includes:
 
 **Percentage**
 
-`Present / (Present + Absent) × 100`
+`Present / Number of completed sessions × 100`
+
+**Clarification (2026-10-04):** This formula follows §7. A completed session with `No Response` counts in the denominator, not in Present or Absent. An admin edits the record if the member was present.
 
 ### Pending sessions
 
@@ -706,11 +710,13 @@ Instead of creating another public chain message, the bot can post a concise gro
 
 > **Attendance reminder**
 >
-> 8 members have not submitted attendance for 24th Junior Prac.
+> Attendance for 24th Junior Prac is still open.
 >
 > Please submit your response.
 
 Where technically permitted and appropriate, private reminders may also be supported for users who have previously started the bot.
+
+**Clarification (2026-10-04):** A reminder that members see shows no counts, so it follows §6 and §26. The example above shows no count. Admins see the outstanding count in their own admin view or in a private message.
 
 ---
 

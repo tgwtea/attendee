@@ -4,9 +4,9 @@ Attendee is a Telegram attendance bot foundation. SMU Samba Masala is the initia
 
 ## Status
 
-The empty bot supports configuration, logging, SQLite connections, migrations, and local backups.
-Attendance features do not exist yet. The bot registers no commands, buttons, conversations, models, or report logic.
-The schema contains no domain tables. Alembic owns future schema changes.
+The bot supports configuration, logging, SQLite connections, migrations, local backups, and organization identity.
+The schema holds organizations, people, and organization memberships with `member` and `admin` roles.
+Attendance features do not exist yet. The bot registers no commands, buttons, conversations, or report logic.
 
 ## Stack
 
@@ -45,13 +45,14 @@ Environment variables override `.env` values.
 | `BACKUP_DIR` | `./data/backups` |
 | `SQLITE_BUSY_TIMEOUT_MS` | `5000`; positive integer |
 
-Admin ID parsing removes duplicates. These IDs do not grant permissions in this foundation.
+Admin ID parsing removes duplicates. Only `attendee-setup` applies these IDs. See [Initial admin setup](#initial-admin-setup).
 Database URLs must select a file through `sqlite+aiosqlite`. Memory databases and URL query parameters are unsupported.
 
 ## Run locally
 
 ```sh
 uv run alembic upgrade head
+uv run attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
 uv run attendee
 ```
 
@@ -80,15 +81,38 @@ uv run alembic current
 uv run alembic history
 ```
 
-No migration revision exists yet. An upgrade can create Alembic's version table only.
-Add model imports to the migration environment when domain models arrive.
-Generate a revision after that change:
+Revision `0001_identity` adds the `organizations`, `people`, and `memberships` tables.
+An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
+`uv run alembic downgrade base` drops the three tables and their data.
+Add new model modules to the import in `alembic/env.py`. Generate a revision after a model change:
 
 ```sh
 uv run alembic revision --autogenerate -m "Describe the schema change"
 ```
 
 Review the generated revision before an upgrade. Never use `create_all()` as the production migration strategy.
+
+## Initial admin setup
+
+Run the setup command after `alembic upgrade head`:
+
+```sh
+BOOTSTRAP_ADMIN_IDS=123456789,987654321 \
+  uv run attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
+```
+
+In Docker, set `BOOTSTRAP_ADMIN_IDS` in `.env`, start the service, and run:
+
+```sh
+docker compose exec -T bot attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
+```
+
+- The slug is the stable organization key: lowercase letters, digits, and single hyphens.
+- The command creates the organization if the slug is new. A rerun keeps the stored name.
+- Each listed Telegram user ID gets the `admin` role in the named organization only.
+- A rerun adds missing admins and promotes a listed `member`. It never demotes or removes anyone.
+- One transaction covers the run. A failure leaves no partial records. An empty ID list fails.
+- The command needs no bot token. Remove an admin by a manual database change until admin management exists.
 
 ## Docker Compose
 
