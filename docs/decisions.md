@@ -22,7 +22,8 @@ The PRD sets these decisions. Change them only through a PRD change.
 | P12 | XLSX is a report and export format, not primary storage. | PRD §29 |
 | P13 | The attendance percentage denominator counts every completed session. `No Response` adds nothing to the numerator and stays `No Response`. An admin edits the record if the member was present. | PRD §7, §9 (clarified 2026-10-04) |
 | P14 | A reminder that members see shows no counts. Only admins see outstanding counts. | PRD §24, §26 (clarified 2026-10-04) |
-| P15 | A reasons export gives each member one cell of comma-separated values: `<session date> (<session label>) <reason>`, or `NA`. Storage keeps one reason per response. | PRD §10 (clarified 2026-10-04) |
+| P15 | A reasons export gives each member one cell of comma-separated values: `<session date> (<session label>) <reason>`, or `NA`. The export replaces a comma inside one reason with `;`. Storage keeps one reason per response, as typed. | PRD §10 (clarified 2026-10-04) |
+| P16 | The previous response stays active until a replacement reason arrives. A member without a previous response stays `No Response`. | PRD §23 (clarified 2026-10-04) |
 
 ## Accepted technical decisions
 
@@ -61,6 +62,8 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T28 | Unresolved matches | Table `unresolved_matches` keeps one record per organization and Telegram user ID, with a reason: `no_match`, `ambiguous`, or `telegram_id_taken`. A repeated call changes nothing. A later successful match sets `resolved_at`. The record grants no access. |
 | T29 | Write transactions take the lock at start | `write_session()` issues `BEGIN IMMEDIATE`. A second writer waits for the busy timeout and does not fail on a lock upgrade. The import apply and account matching use it. |
 | T30 | Stale preview detection | `apply` builds the preview again inside the write transaction. If it differs from the confirmed preview, the import applies nothing and raises `ImportConflict`. A rejected row raises `ImportRejected` and applies nothing. |
+| T31 | A handle match needs member confirmation | Matching by handle proposes one candidate. The bot asks the member to confirm the candidate name. It binds the Telegram ID only after confirmation. A rejection records an unresolved match. The name confirms a match; it never finds one. A Telegram ID match needs no confirmation. Implement in the Telegram onboarding phase. |
+| T32 | Import warns about a possible duplicate | The preview warns when a row to create has the same name as an existing member of the organization. The warning never blocks, matches, or merges. Admins keep a `Telegram ID` column in their namelist files to avoid duplicates after a handle change. |
 
 ## Foundation defaults
 
@@ -78,8 +81,6 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 
 These questions do not block the identity phase. Do not settle them through an implementation assumption.
 
-1. Define the previous response state while a replacement reason remains incomplete (PRD §23).
-2. Define how a comma inside one reason is escaped in the comma-separated reasons cell (P15).
-3. Define whether a handle change through matching may equal a stale handle of another unbound member. Today matching stores the current Telegram handle; a later import then rejects the shared handle for admin action.
+None.
 
-Resolved on 2026-10-04: the percentage denominator (P13), public reminder counts (P14), and bootstrap admin membership (T21).
+Resolved on 2026-10-04: the percentage denominator (P13), public reminder counts (P14), bootstrap admin membership (T21), the reasons cell (P15), the incomplete replacement reason (P16), handle confirmation (T31), and duplicate warnings after a handle change (T32).

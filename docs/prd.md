@@ -346,7 +346,7 @@ Example:
 
 Reasons must only be accessible to authorised admins.
 
-**Clarification (2026-10-04): reasons as comma-separated values.** The current Samba Masala form asks each member for one comma-separated reasons field. Example: `16 Jan (Tech Check) Overseas,17 Jan (Onsite Blocking) Overseas`. A member who attends every session enters `NA`. The bot still stores one reason per response (above). A reasons export or admin reasons view gives each member one cell. The cell joins that member's reasons as comma-separated values in this form: `<session date> (<session label>) <reason>`. The cell holds `NA` when the member has no reason in the selected sessions. How a comma inside one reason is escaped is not yet decided.
+**Clarification (2026-10-04): reasons as comma-separated values.** The current Samba Masala form asks each member for one comma-separated reasons field. Example: `16 Jan (Tech Check) Overseas,17 Jan (Onsite Blocking) Overseas`. A member who attends every session enters `NA`. The bot still stores one reason per response (above). A reasons export or admin reasons view gives each member one cell. The cell joins that member's reasons as comma-separated values in this form: `<session date> (<session label>) <reason>`. The cell holds `NA` when the member has no reason in the selected sessions. The export replaces a comma inside one reason with ";". The stored reason keeps the text that the member typed.
 
 ---
 
@@ -701,6 +701,8 @@ The previous response is replaced for attendance calculation purposes.
 The system may retain an internal audit history, but the latest valid response becomes the active attendance record.
 
 After the poll is closed, only admins should be able to change records.
+
+**Clarification (2026-10-04):** While a replacement reason is incomplete, the previous response stays the active record. Example: a member changes `Coming` to `Late` and sends no reason. The record stays `Coming` until the reason arrives. A member with no previous response stays `No Response`.
 
 ---
 
