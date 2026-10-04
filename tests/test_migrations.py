@@ -5,7 +5,7 @@ from contextlib import closing
 
 from conftest import ROOT, run_alembic
 
-IDENTITY_TABLES = {"organizations", "people", "memberships"}
+IDENTITY_TABLES = {"organizations", "people", "memberships", "unresolved_matches"}
 
 
 def tables(database):
@@ -23,7 +23,7 @@ def test_fresh_and_repeated_upgrade(tmp_path):
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            ("0001_identity",)
+            ("0002_import_matching",)
         ]
 
 
@@ -39,6 +39,29 @@ def test_upgrade_from_empty_foundation(tmp_path):
     result = run_alembic(database, "upgrade", "head")
     assert result.returncode == 0, result.stderr
     assert tables(database) == IDENTITY_TABLES | {"alembic_version"}
+
+
+def test_upgrade_from_identity_normalizes_handles(tmp_path):
+    database = tmp_path / "identity.db"
+    assert run_alembic(database, "upgrade", "0001_identity").returncode == 0
+    with closing(sqlite3.connect(database)) as connection:
+        connection.executemany(
+            "INSERT INTO people (display_name, telegram_handle, created_at, updated_at) "
+            "VALUES (?, ?, '2026-10-04 00:00:00', '2026-10-04 00:00:00')",
+            [("A", " @SarahLim "), ("B", "@a"), ("C", None), ("D", "johntan")],
+        )
+        connection.commit()
+    result = run_alembic(database, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    assert tables(database) == IDENTITY_TABLES | {"alembic_version"}
+    with closing(sqlite3.connect(database)) as connection:
+        rows = connection.execute(
+            "SELECT display_name, telegram_handle FROM people ORDER BY id"
+        ).fetchall()
+    assert rows == [("A", "sarahlim"), ("B", None), ("C", None), ("D", "johntan")]
+    result = run_alembic(database, "downgrade", "0001_identity")
+    assert result.returncode == 0, result.stderr
+    assert tables(database) == IDENTITY_TABLES - {"unresolved_matches"} | {"alembic_version"}
 
 
 def test_models_match_migration_and_downgrade(tmp_path):
@@ -59,7 +82,7 @@ def test_failed_revision_rolls_back_schema(tmp_path):
     (scripts / "versions" / "failure.py").write_text(
         "from alembic import op\n"
         'revision = "failure"\n'
-        'down_revision = "0001_identity"\n'
+        'down_revision = "0002_import_matching"\n'
         "def upgrade():\n"
         '    op.execute("CREATE TABLE migration_probe (id INTEGER)")\n'
         '    raise RuntimeError("deliberate migration failure")\n'

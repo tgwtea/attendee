@@ -119,17 +119,17 @@ async def test_handle_change_keeps_identity(services):
     person = await identity.create_person("Sarah Lim", 333, "@sarahlim")
     changed = await identity.change_handle(person.id, "@sarah_new")
     assert (changed.id, changed.telegram_user_id) == (person.id, 333)
-    assert changed.telegram_handle == "@sarah_new"
+    assert changed.telegram_handle == "sarah_new"
     found = await identity.find_by_telegram_user_id(333)
     assert found is not None
     assert found.id == person.id
-    assert found.telegram_handle == "@sarah_new"
+    assert found.telegram_handle == "sarah_new"
 
 
 async def test_timestamps_are_utc(services):
     _, identity, _, _ = services
     person = await identity.create_person("A")
-    found = await identity.change_handle(person.id, "@a")
+    found = await identity.change_handle(person.id, "@alpha")
     for value in (found.created_at, found.updated_at):
         assert value.tzinfo is UTC
         assert abs(datetime.now(UTC) - value).total_seconds() < 60

@@ -346,6 +346,8 @@ Example:
 
 Reasons must only be accessible to authorised admins.
 
+**Clarification (2026-10-04): reasons as comma-separated values.** The current Samba Masala form asks each member for one comma-separated reasons field. Example: `16 Jan (Tech Check) Overseas,17 Jan (Onsite Blocking) Overseas`. A member who attends every session enters `NA`. The bot still stores one reason per response (above). A reasons export or admin reasons view gives each member one cell. The cell joins that member's reasons as comma-separated values in this form: `<session date> (<session label>) <reason>`. The cell holds `NA` when the member has no reason in the selected sessions. How a comma inside one reason is escaped is not yet decided.
+
 ---
 
 # 11. Poll Creation Flow

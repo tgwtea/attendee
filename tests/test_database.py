@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from attendee.config.settings import Settings
 from attendee.persistence.base import Base
-from attendee.persistence.database import create_engine, create_session_factory
+from attendee.persistence.database import create_engine, create_session_factory, write_session
 
 
 async def test_connections_and_sessions(tmp_path):
@@ -52,7 +52,39 @@ async def test_foreign_keys_enforced(tmp_path):
 def test_metadata_has_only_identity_tables():
     from attendee.persistence import models  # noqa: F401
 
-    assert set(Base.metadata.tables) == {"organizations", "people", "memberships"}
+    assert set(Base.metadata.tables) == {
+        "organizations",
+        "people",
+        "memberships",
+        "unresolved_matches",
+    }
+
+
+async def test_write_session_begins_immediate(tmp_path):
+    settings = Settings(database_url=f"sqlite+aiosqlite:///{tmp_path / 'lock.db'}")
+    engine = create_engine(settings)
+    try:
+        factory = create_session_factory(engine)
+        async with factory.begin() as session:
+            await session.execute(text("CREATE TABLE lock_probe (id INTEGER)"))
+        async with write_session(factory) as session:
+            await session.execute(text("SELECT 1"))
+            # The write lock is held before any write, so another writer cannot start.
+            other = sqlite3.connect(settings.database_path, timeout=0)
+            try:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    other.execute("BEGIN IMMEDIATE")
+            finally:
+                other.close()
+            await session.execute(text("INSERT INTO lock_probe VALUES (1)"))
+        with pytest.raises(RuntimeError):
+            async with write_session(factory) as session:
+                await session.execute(text("INSERT INTO lock_probe VALUES (2)"))
+                raise RuntimeError("rollback")
+        async with factory() as session:
+            assert await session.scalar(text("SELECT count(*) FROM lock_probe")) == 1
+    finally:
+        await engine.dispose()
 
 
 async def test_schema_transaction_rolls_back(tmp_path):

@@ -82,8 +82,9 @@ uv run alembic history
 ```
 
 Revision `0001_identity` adds the `organizations`, `people`, and `memberships` tables.
+Revision `0002_import_matching` adds `unresolved_matches` and the `people.telegram_handle` index. It converts stored handles to lowercase without `@`. It sets a handle that Telegram would reject to `NULL`.
 An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
-`uv run alembic downgrade base` drops the three tables and their data.
+`uv run alembic downgrade base` drops every table and its data.
 Add new model modules to the import in `alembic/env.py`. Generate a revision after a model change:
 
 ```sh
@@ -113,6 +114,23 @@ docker compose exec -T bot attendee-setup --organization smu-samba-masala --name
 - A rerun adds missing admins and promotes a listed `member`. It never demotes or removes anyone.
 - One transaction covers the run. A failure leaves no partial records. An empty ID list fails.
 - The command needs no bot token. Remove an admin by a manual database change until admin management exists.
+
+## Namelist import
+
+The file is CSV (UTF-8) or XLSX (first sheet). Required columns: `Name`, `Telegram Handle`. Optional column: `Telegram ID`. The import ignores other columns and lists them.
+
+```sh
+uv run attendee-import --organization smu-samba-masala namelist.csv          # preview only
+uv run attendee-import --organization smu-samba-masala --apply namelist.csv  # write
+```
+
+- The preview lists the rows to create, update, and keep, and the rejected rows with reasons.
+- A rejected row blocks the whole import. The command exits with code 2 and writes nothing.
+- The import matches by Telegram ID, then by handle. It never matches by name.
+- A member absent from the file stays unchanged. The import never removes or demotes anyone.
+- New people get the `member` role. The command never stores the file.
+
+In Docker, copy the file into the container first, then run `docker compose exec -T bot attendee-import ...`.
 
 ## Docker Compose
 

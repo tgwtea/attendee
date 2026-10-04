@@ -24,7 +24,8 @@ Update this file when the repository structure changes.
 │   ├── script.py.mako
 │   └── versions/
 │       ├── README.md
-│       └── 0001_identity.py
+│       ├── 0001_identity.py
+│       └── 0002_import_matching.py
 ├── scripts/entrypoint.sh
 ├── src/attendee/
 │   ├── __init__.py
@@ -32,6 +33,7 @@ Update this file when the repository structure changes.
 │   ├── logging.py
 │   ├── backup.py
 │   ├── setup.py
+│   ├── importer.py
 │   ├── config/
 │   │   ├── __init__.py
 │   │   └── settings.py
@@ -52,13 +54,19 @@ Update this file when the repository structure changes.
 │   │   ├── identity.py
 │   │   ├── memberships.py
 │   │   ├── authorization.py
-│   │   └── bootstrap.py
+│   │   ├── bootstrap.py
+│   │   ├── import_files.py
+│   │   ├── imports.py
+│   │   └── matching.py
 │   ├── domain/
 │   │   ├── __init__.py
-│   │   └── identity.py
+│   │   ├── identity.py
+│   │   ├── imports.py
+│   │   └── matching.py
 │   ├── repositories/
 │   │   ├── __init__.py
-│   │   └── identity.py
+│   │   ├── identity.py
+│   │   └── matching.py
 │   └── reporting/__init__.py
 ├── tests/
 │   ├── conftest.py
@@ -68,7 +76,9 @@ Update this file when the repository structure changes.
 │   ├── test_startup.py
 │   ├── test_backup.py
 │   ├── test_identity.py
-│   └── test_bootstrap.py
+│   ├── test_bootstrap.py
+│   ├── test_imports.py
+│   └── test_matching.py
 └── docs/
     ├── prd.md
     ├── architecture.md
@@ -88,16 +98,17 @@ Update this file when the repository structure changes.
 | `.env.example`, `.gitignore`, `.dockerignore` | Example settings and local/build exclusions |
 | `.github/workflows/ci.yml` | Automated dependency, lint, format, type, and test checks |
 | `Dockerfile`, `compose.yaml`, `scripts/entrypoint.sh` | Container build, persistent volume, and migration-first startup |
-| `alembic.ini`, `alembic/` | Async migrations; `0001_identity` revision |
+| `alembic.ini`, `alembic/` | Async migrations; `0001_identity` and `0002_import_matching` revisions |
 | `src/attendee/main.py` | Explicit dependency construction and bot lifecycle |
 | `src/attendee/config/` | Validated environment settings |
 | `src/attendee/logging.py` | Standard logs with token redaction |
 | `src/attendee/telegram/` | Empty long-polling application construction |
 | `src/attendee/persistence/` | ORM metadata and identity models, UTC column type, SQLite engine, session factory |
-| `src/attendee/domain/identity.py` | Membership roles, role ranking, slug rule |
-| `src/attendee/application/` | Identity, membership, authorization, and bootstrap operations; DTOs; errors |
-| `src/attendee/repositories/identity.py` | Organization, person, and organization-scoped membership queries |
+| `src/attendee/domain/` | Membership roles, slug and handle rules, import row validation, match outcomes |
+| `src/attendee/application/` | Identity, membership, authorization, bootstrap, import, and matching operations; DTOs; errors |
+| `src/attendee/repositories/` | Organization, person, membership, and unresolved match queries, each organization-scoped where it applies |
 | `src/attendee/setup.py` | `attendee-setup` command for bootstrap admins |
+| `src/attendee/importer.py` | `attendee-import` command: preview or apply a namelist |
 | `src/attendee/backup.py` | Safe local backups and retention |
 | `reporting/` | Package boundary only; no feature code |
 | `tests/` | Foundation and identity tests with temporary migrated databases and no live Telegram account |

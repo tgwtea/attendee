@@ -22,6 +22,7 @@ dependencies = [
 attendee = "attendee.main:main"
 attendee-backup = "attendee.backup:main"
 attendee-setup = "attendee.setup:main"
+attendee-import = "attendee.importer:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.11,<1", "pyright>=1.1,<2"]

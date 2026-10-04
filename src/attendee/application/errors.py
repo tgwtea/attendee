@@ -19,3 +19,11 @@ class DuplicateTelegramUserId(ApplicationError):
 
 class DuplicateMembership(ApplicationError):
     pass
+
+
+class ImportRejected(ApplicationError):
+    """The preview has a rejected row, so the import applies no row."""
+
+
+class ImportConflict(ApplicationError):
+    """The organization changed after the preview, so the import applies no row."""

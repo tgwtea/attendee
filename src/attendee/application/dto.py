@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict
 
 from attendee.domain.identity import MembershipRole
+from attendee.domain.matching import UnresolvedReason
 
 
 class _Record(BaseModel):
@@ -34,3 +35,14 @@ class MembershipDTO(_Record):
     role: MembershipRole
     created_at: datetime
     updated_at: datetime
+
+
+class UnresolvedMatchDTO(_Record):
+    id: int
+    organization_id: int
+    telegram_user_id: int
+    telegram_handle: str | None
+    reason: UnresolvedReason
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None

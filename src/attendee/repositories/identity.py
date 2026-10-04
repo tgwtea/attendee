@@ -36,6 +36,14 @@ class PersonRepository:
             select(Person).where(Person.telegram_user_id == telegram_user_id)
         )
 
+    async def list_by_telegram_user_ids(self, telegram_user_ids: set[int]) -> list[Person]:
+        if not telegram_user_ids:
+            return []
+        result = await self.session.scalars(
+            select(Person).where(Person.telegram_user_id.in_(telegram_user_ids))
+        )
+        return list(result)
+
     async def add(self, person: Person) -> Person:
         self.session.add(person)
         await self.session.flush()
@@ -58,3 +66,29 @@ class MembershipRepository:
         self.session.add(membership)
         await self.session.flush()
         return membership
+
+    async def list_members(self, organization_id: int) -> list[tuple[Membership, Person]]:
+        """Every membership in the organization with its person, in person ID order."""
+        rows = await self.session.execute(
+            select(Membership, Person)
+            .join(Person, Person.id == Membership.person_id)
+            .where(Membership.organization_id == organization_id)
+            .order_by(Person.id)
+        )
+        return [(membership, person) for membership, person in rows.tuples()]
+
+    async def find_unbound_people_by_handle(
+        self, organization_id: int, telegram_handle: str
+    ) -> list[Person]:
+        """Members of the organization with this canonical handle and no Telegram user ID."""
+        result = await self.session.scalars(
+            select(Person)
+            .join(Membership, Membership.person_id == Person.id)
+            .where(
+                Membership.organization_id == organization_id,
+                Person.telegram_handle == telegram_handle,
+                Person.telegram_user_id.is_(None),
+            )
+            .order_by(Person.id)
+        )
+        return list(result)

@@ -1,4 +1,4 @@
-"""ORM records for organizations, global people, and organization memberships."""
+"""ORM records for organizations, global people, memberships, and unresolved matches."""
 
 from datetime import datetime
 
@@ -6,12 +6,13 @@ from sqlalchemy import BigInteger, CheckConstraint, Enum, ForeignKey, String, Un
 from sqlalchemy.orm import Mapped, mapped_column
 
 from attendee.domain.identity import MembershipRole
+from attendee.domain.matching import UnresolvedReason
 from attendee.persistence.base import Base
 from attendee.persistence.types import UTCDateTime, utc_now
 
 
-def _role_values(roles: type[MembershipRole]) -> list[str]:
-    return [role.value for role in roles]
+def _enum_values(values: type[MembershipRole] | type[UnresolvedReason]) -> list[str]:
+    return [value.value for value in values]
 
 
 class Organization(Base):
@@ -41,7 +42,8 @@ class Person(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     display_name: Mapped[str | None] = mapped_column(String(200))
     telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
-    telegram_handle: Mapped[str | None] = mapped_column(String(64))
+    # Canonical form: lowercase, no leading "@". Unique per organization by application rule.
+    telegram_handle: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
 
@@ -66,8 +68,45 @@ class Membership(Base):
             native_enum=False,
             create_constraint=True,
             validate_strings=True,
-            values_callable=_role_values,
+            values_callable=_enum_values,
         )
     )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+class UnresolvedMatch(Base):
+    """A Telegram account that matching could not bind in one organization.
+
+    One record exists per organization and Telegram user ID. It grants no access.
+    """
+
+    __tablename__ = "unresolved_matches"
+    __table_args__ = (
+        CheckConstraint("telegram_user_id > 0", name="telegram_user_id_positive"),
+        UniqueConstraint(
+            "organization_id",
+            "telegram_user_id",
+            name="uq_unresolved_matches_organization_id_telegram_user_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT")
+    )
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger)
+    telegram_handle: Mapped[str | None] = mapped_column(String(64))
+    reason: Mapped[UnresolvedReason] = mapped_column(
+        Enum(
+            UnresolvedReason,
+            name="unresolved_reason",
+            native_enum=False,
+            create_constraint=True,
+            validate_strings=True,
+            values_callable=_enum_values,
+        )
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

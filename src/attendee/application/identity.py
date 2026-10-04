@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee.application.dto import PersonDTO
 from attendee.application.errors import DuplicateTelegramUserId, NotFound
+from attendee.domain.identity import normalize_handle
 from attendee.persistence.models import Person
 from attendee.repositories.identity import PersonRepository
 
@@ -12,6 +13,11 @@ from attendee.repositories.identity import PersonRepository
 def _clean(value: str | None) -> str | None:
     value = None if value is None else value.strip()
     return value or None
+
+
+def _handle(value: str | None) -> str | None:
+    value = _clean(value)
+    return None if value is None else normalize_handle(value)
 
 
 class IdentityService:
@@ -30,6 +36,7 @@ class IdentityService:
             raise ValueError("A person needs a display name or a Telegram user ID")
         if telegram_user_id is not None and telegram_user_id <= 0:
             raise ValueError("A Telegram user ID must be positive")
+        telegram_handle = _handle(telegram_handle)
         try:
             async with self.session_factory.begin() as session:
                 people = PersonRepository(session)
@@ -42,7 +49,7 @@ class IdentityService:
                     Person(
                         display_name=display_name,
                         telegram_user_id=telegram_user_id,
-                        telegram_handle=_clean(telegram_handle),
+                        telegram_handle=telegram_handle,
                     )
                 )
                 return PersonDTO.model_validate(person)
@@ -56,10 +63,11 @@ class IdentityService:
 
     async def change_handle(self, person_id: int, telegram_handle: str | None) -> PersonDTO:
         """Change the handle only. The person and Telegram user ID stay the same."""
+        telegram_handle = _handle(telegram_handle)
         async with self.session_factory.begin() as session:
             person = await PersonRepository(session).get(person_id)
             if person is None:
                 raise NotFound(f"Person {person_id}")
-            person.telegram_handle = _clean(telegram_handle)
+            person.telegram_handle = telegram_handle
             await session.flush()
             return PersonDTO.model_validate(person)

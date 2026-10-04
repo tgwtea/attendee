@@ -148,5 +148,6 @@ The accepted stack is in `docs/decisions.md`. Do not reopen those choices withou
 - Run Ruff lint, Ruff format checks, strict Pyright, and pytest before completion.
 
 The identity phase adds organizations, people, memberships, roles, authorization, and `attendee-setup`.
+The import phase adds namelist import (`attendee-import`), Telegram account matching, and unresolved matches.
 No product handlers, attendance models, or report logic exist yet.
 Document future concepts without speculative feature code.

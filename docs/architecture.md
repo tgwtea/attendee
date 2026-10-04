@@ -35,7 +35,7 @@ Incomplete conversations can reset after restart. Committed attendance data must
 | Table | Key columns | Constraints |
 | --- | --- | --- |
 | `organizations` | `slug`, `name` | Unique non-empty slug; non-empty name |
-| `people` | `display_name`, `telegram_user_id`, `telegram_handle` | Unique positive Telegram ID; a name or a Telegram ID is required; names and handles are not unique |
+| `people` | `display_name`, `telegram_user_id`, `telegram_handle` | Unique positive Telegram ID; a name or a Telegram ID is required; names are not unique; the handle is canonical and indexed |
 | `memberships` | `organization_id`, `person_id`, `role` | One membership per person per organization; role is `member` or `admin`; restricting foreign keys |
 
 - A global person holds Telegram identity. A person can exist before the Telegram user ID is known.
@@ -52,12 +52,36 @@ Every membership links a person to an organization.
 Every membership has a role.
 If a person lacks a membership in an organization then the authorization service denies access to the organization.
 
+## Namelist import and account matching (implemented)
+
+Import (`application/imports.py`, `application/import_files.py`, `domain/imports.py`):
+
+1. `parse_csv` or `parse_xlsx` reads the bytes in memory. Required columns are `Name` and `Telegram Handle`. `Telegram ID` is optional. Header case and spacing do not matter.
+2. `read_table` validates each row: name, handle, Telegram ID, and duplicates in the file.
+3. `ImportService.preview` reads the organization members and plans each row: create, update, unchanged, or reject with reasons. It also lists ignored columns and members not in the file.
+4. `ImportService.apply` takes the SQLite write lock, builds the preview again, and compares. Any difference or any rejected row applies nothing.
+
+Matching (`application/matching.py`): `AccountMatchingService.match(organization_id, telegram_user_id, handle)`.
+
+1. A member with the Telegram ID matches. The service stores the current handle.
+2. A Telegram ID that belongs to a person outside the organization binds nothing.
+3. Otherwise, exactly one member without a Telegram ID and with the canonical handle gets the ID.
+4. Zero or several candidates bind nothing.
+
+Every case that binds nothing records an `unresolved_matches` row for admin resolution.
+
+[ACE LOGIC]
+Every import targets an organization.
+If a row has no name then the import rejects the row.
+If an import contains a rejected row then the import applies no row.
+If a Telegram account matches no member of an organization then the matching service binds no person.
+If a Telegram account matches more than one member of an organization then the matching service records an unresolved match.
+
 ## Future organization model
 
 These are design constraints, not implemented models.
 
 - An `Organization` also owns chats, series, and custom field definitions.
-- Account matching binds a Telegram user ID to an imported person (PRD §31). It does not exist yet.
 - An organization can have several Telegram chats.
 - A series belongs to one organization. It can select a default chat.
 - A session can override that chat with another chat from the same organization.
@@ -104,7 +128,8 @@ Application operations use short transactions and separate sessions. Do not shar
 
 Alembic owns schema changes. Its async environment imports the project metadata and shares the engine configuration.
 `alembic/env.py` imports `attendee.persistence.models` before it reads the metadata.
-Revision `0001_identity` creates the identity tables. Revisions use plain SQLAlchemy types.
+Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revisions use plain SQLAlchemy types.
+`write_session()` starts a transaction with `BEGIN IMMEDIATE`. Use it for an operation that reads and then writes.
 SQLite stores timestamps as naive UTC. The `UTCDateTime` column type rejects naive input and returns aware UTC values.
 Review generated revisions before deployment. Never use runtime `create_all()`.
 
@@ -117,17 +142,10 @@ Export failure must never change committed attendance data.
 
 CSV imports use Python's `csv` module. XLSX imports and exports use `openpyxl`. Do not add pandas.
 
-Future imports follow this sequence:
+The import pipeline (parse, validate, preview, confirm, apply) exists. A Telegram upload handler does not exist yet.
+Never match by name. Send ambiguous matches to admin resolution.
 
-1. Receive the upload.
-2. Parse the file.
-3. Validate the records.
-4. Show a preview.
-5. Obtain admin confirmation.
-6. Apply safe inserts or updates in a transaction.
-
-Match a known Telegram user ID first. Otherwise, use the normalized Telegram handle.
-Never match by name alone. Send ambiguous matches to admin resolution.
+A future reasons export gives each member one comma-separated cell (decision P15).
 
 Uploads are temporary. Generate exports on demand from SQLite. Delete each generated file after delivery or failure.
 One series has one logical workbook, reconstructed from its sessions. No spreadsheet requires persistent storage.
