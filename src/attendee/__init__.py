@@ -1,0 +1,1 @@
+"""Attendee package boundary."""

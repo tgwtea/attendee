@@ -1,0 +1,27 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.13
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Ruff lint
+        run: uv run --locked ruff check .
+      - name: Ruff format
+        run: uv run --locked ruff format --check .
+      - name: Pyright
+        run: uv run --locked pyright
+      - name: Tests
+        run: uv run --locked pytest

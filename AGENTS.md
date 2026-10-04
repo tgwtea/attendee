@@ -4,7 +4,7 @@ Durable rules for every coding agent in this repository.
 
 ## Project purpose
 
-This project is a Telegram attendance bot for SMU Samba Masala. It replaces the Telegram chain-message attendance workflow.
+This project is a generic Telegram attendance bot. SMU Samba Masala is its initial user. It replaces chain-message attendance.
 
 - `docs/prd.md` is the product source of truth.
 - Read the relevant PRD sections before you change behaviour.
@@ -69,7 +69,8 @@ Admins configure member fields such as Senior/Junior, Section, Group, and Instru
 ## Persistence and XLSX
 
 - Structured persistent storage is the source of truth (PRD §29).
-- XLSX is a report and export format only. It is not the datastore.
+- XLSX supports member imports and attendance exports. It is not the datastore.
+- Keep uploaded and generated spreadsheets temporary. SQLite remains the source of truth.
 - An XLSX generation failure never loses an attendance response (PRD §36).
 - Attendance data survives a process restart (PRD §36).
 
@@ -127,3 +128,24 @@ At the end of an implementation task, report:
 - behaviour implemented;
 - checks and tests run;
 - unresolved issues and assumptions.
+
+## Accepted implementation constraints
+
+The accepted stack is in `docs/decisions.md`. Do not reopen those choices without an explicit request.
+
+- Use Python 3.13, `uv`, and the `src/attendee` package.
+- Keep ORM models separate from Pydantic DTOs (data transfer objects).
+- Keep organization scope explicit in services and repositories.
+- Use global person identity with organization memberships and organization-scoped roles.
+- Keep session roster snapshots fixed after creation.
+- Store custom fields in relational tables. Keep one current response and append-only audit history.
+- Let Alembic own schema changes. Never use runtime `create_all()`.
+- Keep SQLite transactions short. Enable WAL, foreign keys, and a busy timeout on database connections.
+- Store timestamps in UTC. Use `datetime` and `zoneinfo`.
+- Use standard logging. Never log tokens or private reasons.
+- Construct dependencies manually. Do not add a dependency injection framework.
+- Do not add pandas, a web framework, Redis, Celery, APScheduler, Sentry, or an extra logging framework.
+- Run Ruff lint, Ruff format checks, strict Pyright, and pytest before completion.
+
+The current foundation has no product handlers, models, repositories, services, or report logic.
+Document future concepts without speculative feature code.

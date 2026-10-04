@@ -1,91 +1,134 @@
 # Architecture
 
-Status: initial guidance. No implementation exists.
+Status: runnable infrastructure foundation. Product features do not exist yet.
 
-This document describes boundaries and concepts. It does not select technology. The binding rules are in `AGENTS.md`. Product detail is in `docs/prd.md`.
+`docs/prd.md` defines the product. `docs/decisions.md` records the accepted stack. `AGENTS.md` defines coding rules.
 
-## Confirmed product constraints
+## Layers
 
-The PRD imposes these facts:
+The request path has five layers:
 
-- Telegram is the only MVP user interface. There is no web or mobile app (PRD §5).
-- A Telegram bot cannot reliably start a private chat with a user who never opened the bot. Reason collection therefore needs a deep link from the group into the private chat (PRD §15).
-- Admins are configured data, not code (PRD §25).
-- Member fields are configured data, not code (PRD §18).
-- Structured storage is the source of truth. XLSX is derived output (PRD §29).
-- The system must save a response before it confirms success (PRD §36).
-- Target scale: 500 registered members, 250 required respondents on one poll (PRD §35).
+1. Telegram handlers receive updates and render replies.
+2. Application services check permissions and coordinate domain operations.
+3. Repositories encapsulate database access with explicit organization scope.
+4. SQLAlchemy ORM maps persistent records to Python objects.
+5. SQLite stores canonical data.
 
-## Recommended boundaries
+The domain defines attendance rules without Telegram, database, or spreadsheet dependencies.
+Pydantic data transfer objects (DTOs) carry validated application input and output. They remain separate from ORM models.
+Reporting reads canonical data and domain calculations. It does not own attendance calculations or write attendance records.
+Configuration supplies validated settings. The entry point constructs dependencies explicitly. No dependency injection framework exists.
 
-### Interaction flow
+## Current foundation
 
-1. Telegram
-2. Transport and interaction layer
-3. Application use cases
-4. Domain
-5. Persistence
+Python 3.13 uses a `src/attendee` package and `uv` dependencies.
+The entry point loads settings, configures standard logging, constructs database dependencies, and starts an empty Telegram application.
+The application uses long polling. It registers no commands, callbacks, or conversations.
+The application checks database access before polling. It disposes the engine after shutdown or startup failure.
 
-### Reporting flow
+Future multi-step interactions use `ConversationHandler`. Telegram processes updates sequentially to preserve conversation state.
+Future handlers must keep transactions short. Spreadsheet work must not block the event loop.
+Incomplete conversations can reset after restart. Committed attendance data must survive restart.
 
-1. Application and domain
-2. Reporting and export
-3. XLSX file
+## Future organization and identity model
 
-### Layer responsibilities
+These are design constraints, not implemented models.
 
-**Transport and interaction layer.** It receives Telegram updates, commands, and button callbacks. It translates each one into an application command. It renders results as Telegram messages and buttons. It does not own attendance business logic.
+- An `Organization` owns its memberships, roles, chats, series, and custom field definitions.
+- A global person holds Telegram identity. The Telegram user ID becomes durable after account matching.
+- Membership links a person to an organization. A person can belong to several organizations.
+- Roles belong to an organization membership. MVP roles are `member` and `admin`.
+- Bootstrap admin IDs come from the environment. This foundation only parses them; it grants no permissions or global admin role.
+- An organization can have several Telegram chats.
+- A series belongs to one organization. It can select a default chat.
+- A session can override that chat with another chat from the same organization.
+- A series holds a default roster. Session creation copies the required membership into a session roster snapshot.
+- Later roster changes never alter an existing snapshot.
+- Custom field definitions, selection options, and membership values use relational tables, not a JSON blob.
+- Responses have one current active state and append-only audit records.
 
-**Application use cases.** Each use case is one user intent, for example "submit response" or "close session". A use case checks permissions, loads domain state, calls domain rules, and saves the result in one unit of work. It returns a result that the transport layer can render.
+[ACE LOGIC]
+Every attendance series belongs to an organization.
+Every attendance session has a roster snapshot.
+If an administrator changes a default roster then every existing roster snapshot remains unchanged.
 
-**Domain.** It holds the attendance rules: status-to-value mapping, reason requirements, session state rules, the one-active-response rule, and attendance calculations. It has no dependency on Telegram, storage, or XLSX.
+Generic domain code must not assume a particular organization, instrument, section, or membership category.
+SMU Samba Masala remains the initial user. Multiple-organization readiness does not add a new MVP management interface.
 
-**Persistence.** It stores canonical attendance data. It enforces uniqueness and concurrency guarantees at the storage level where possible.
+## Attendance constraints
 
-**Reporting and export.** It reads canonical data and the domain calculations. It builds the workbook. It never writes attendance data back, and it never calculates attendance by its own rules.
+| Status | Value | Reason |
+| --- | ---: | --- |
+| Coming | 1 | Not required |
+| Not Coming | 0 | Required |
+| Late | 0 | Required |
+| Leaving Early | 0 | Required |
 
-## Core domain concepts
+Preserve the original status and reason. Collect reasons in the private bot chat.
+Only authorized organization admins see aggregate attendance, other members' records, and reasons.
+A member sees their own response and reason only.
 
-These are concepts, not class designs. PRD §27 has a conceptual field list.
+A passed deadline leaves the poll open. A non-responder remains `No Response`, including after closure.
+An admin closes the poll manually after confirmation. Members can change responses while the poll is open.
+Only admins can change records after closure.
 
-- **Member.** A person on the namelist. It has a name, a Telegram handle, an optional bound Telegram user ID, an active flag, and custom field values.
-- **Admin.** A Telegram account with permission to manage attendance, members, series, exports, and admins. MVP has one permission level (PRD §25).
-- **Member Field Definition.** An admin-defined attribute, such as Section. MVP types: short text and predefined selection. Definitions drive filters, sort, spreadsheet columns, and member selection.
-- **Attendance Series.** A named group of sessions, such as `24th Junior Prac`. One series maps to one workbook. Admins select an existing series to avoid near-duplicate names.
-- **Attendance Session.** One practice, gig, or event in a series. It has a label, a date, a soft deadline, a required member set, and a status (`Draft`, `Open`, `Deadline Passed`, `Closed`). `Deadline Passed` is still open.
-- **Attendance Response.** One member's active answer for one session. It has a status, a binary value, a reason when required, and timestamps.
+Future application operations evaluate the deadline from UTC timestamps when they read session state.
+`Deadline Passed` does not require a dedicated scheduler or an automatic closure task.
+PRD §35 remains the capacity target: 500 registered members and 250 required respondents per poll.
 
-## Workflows
+## Persistence and migrations
 
-1. **Member onboarding and identity binding.** The member opens the bot. The system matches the Telegram handle to one namelist entry. It then binds the Telegram user ID to that member. If the match is not certain, the system sends the user to admin resolution.
-2. **Create attendance series.** An admin selects an existing series or creates a new one.
-3. **Create attendance session.** An admin enters the series, label and date, required members, and deadline. The admin confirms the summary. The bot posts the poll in the group.
-4. **Submit Coming.** The member taps Coming. The use case saves the response. Then the bot confirms.
-5. **Submit a non-Coming response.** The member taps Not Coming, Late, or Leaving Early. The bot sends the member to the private chat with a deep link. The member enters a reason. The use case saves the status and reason. Then the bot confirms in private.
-6. **Update a response.** The member selects a new status while the session is open. The new response replaces the active response. A non-Coming status needs a reason (PRD §23). The state of the old response while the reason is pending is not defined in the PRD.
-7. **Check outstanding members.** An admin asks for status. The bot shows counts by status and the `No Response` members.
-8. **Deadline passes.** The session moves to `Deadline Passed`. It stays open. Members can still respond. Admins can send reminders.
-9. **Close a session.** An admin requests closure. The bot shows the outstanding count and asks for confirmation. After closure, the bot rejects member responses. `No Response` stays `No Response`.
-10. **Export XLSX.** An admin requests the workbook for a series. The reporting layer builds it from stored data.
+The async SQLAlchemy engine uses `aiosqlite`. Each connection enables foreign keys, WAL mode, and a 5,000 ms busy timeout.
+WAL means write-ahead log. SQLite uses this log to permit readers during a write transaction.
+SQLAlchemy controls explicit transaction starts, including schema changes and savepoints.
+Application operations use short transactions and separate sessions. Do not share an active session between concurrent operations.
 
-## Reliability
+Alembic owns schema changes. Its async environment imports the project metadata and shares the engine configuration.
+The metadata contains no domain tables. There is no baseline revision. Alembic may create its own version table.
+Future migrations must import the model modules before Alembic reads the metadata.
+Review generated revisions before deployment. Never use runtime `create_all()`.
 
-- Save a response to persistent storage before the bot confirms success.
-- Make callback handling idempotent. A Telegram retry or a repeated tap must not create a second response.
-- Run XLSX export apart from response saving. An export failure must not change saved responses.
-- Simultaneous submissions from one member must leave one active response. Use a storage-level uniqueness guarantee, not only an application check.
+Future response updates must commit before Telegram confirms success.
+Database constraints and transactions must prevent duplicate active responses under retries and concurrent requests.
+A repeated Telegram callback must have no additional effect.
+Export failure must never change committed attendance data.
 
-## Unresolved technical decisions
+## Imports and reports
 
-These choices are open. See `docs/decisions.md`.
+CSV imports use Python's `csv` module. XLSX imports and exports use `openpyxl`. Do not add pandas.
 
-- Programming language and runtime
-- Telegram bot framework or library
-- Database
-- ORM or query layer, if any
-- XLSX generation library
-- Hosting and deployment environment
-- Production storage location
-- Background and scheduled job mechanism
-- Testing framework
-- CI/CD approach
+Future imports follow this sequence:
+
+1. Receive the upload.
+2. Parse the file.
+3. Validate the records.
+4. Show a preview.
+5. Obtain admin confirmation.
+6. Apply safe inserts or updates in a transaction.
+
+Match a known Telegram user ID first. Otherwise, use the normalized Telegram handle.
+Never match by name alone. Send ambiguous matches to admin resolution.
+
+Uploads are temporary. Generate exports on demand from SQLite. Delete each generated file after delivery or failure.
+One series has one logical workbook, reconstructed from its sessions. No spreadsheet requires persistent storage.
+
+## Configuration and operations
+
+Settings use Pydantic v2 and `pydantic-settings`. Local `.env` values yield to environment variables.
+The bot requires a token. Backups and migrations do not require one.
+Admin IDs accept comma-separated values or a JSON array of positive integers. The parser removes duplicates.
+This foundation permits an empty admin list because it has no admin operations.
+
+Store timestamps in UTC. Use `datetime` and `zoneinfo`. The default application timezone is `Asia/Singapore`.
+Logs use UTC and standard Python logging. Token values are redacted from bot logs.
+
+Docker runs one bot instance as a non-root user. A named volume at `/app/data` holds SQLite and backups.
+Container startup runs `alembic upgrade head` before the bot. Migration failure prevents bot startup.
+A Linux VM supplies host cron. No Redis, Celery, APScheduler, Sentry, or serverless service exists.
+
+The backup command uses SQLite's backup API. It includes committed WAL data without a blind database copy.
+A file lock prevents overlap within the backup directory. A temporary file becomes a completed backup only after success.
+Retention removes older command-owned backups after success and keeps the latest 14.
+Host cron calls the command daily. Restore remains a manual server operation.
+
+See `README.md` for commands and `docs/decisions.md` for deferred questions.

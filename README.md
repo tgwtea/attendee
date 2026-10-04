@@ -1,31 +1,178 @@
-# Samba Attendance Bot
+# Attendee
 
-A Telegram attendance bot for SMU Samba Masala.
-
-## Problem
-
-The group collects attendance with Telegram chain messages. Members copy and resend a growing list. An admin then types the responses into Excel by hand. With 100+ members, this causes chat noise, manual work, transcription errors, and poor visibility of who has not responded.
+Attendee is a Telegram attendance bot foundation. SMU Samba Masala is the initial user.
 
 ## Status
 
-- Implementation has not started.
-- The technology stack is not selected.
-- The repository holds documentation only. There are no setup or run commands.
+The empty bot supports configuration, logging, SQLite connections, migrations, and local backups.
+Attendance features do not exist yet. The bot registers no commands, buttons, conversations, models, or report logic.
+The schema contains no domain tables. Alembic owns future schema changes.
 
-## Intended attendance flow
+## Stack
 
-1. An admin creates a poll for a session in an attendance series, for example `24th Junior Prac`.
-2. The bot posts one poll message in the Telegram group with four buttons: Coming, Not Coming, Late, Leaving Early.
-3. A member taps Coming. The bot records the response.
-4. A member taps another status. The bot asks for a reason in a private chat. The reason never appears in the group.
-5. Admins see progress and outstanding members. They can send reminders.
-6. The deadline is soft. The poll stays open until an admin closes it.
-7. The bot exports one `.xlsx` workbook for each attendance series.
+| Area | Choice |
+| --- | --- |
+| Runtime | Python 3.13, `uv`, `src/` layout |
+| Telegram | `python-telegram-bot`, long polling; future `ConversationHandler` |
+| Validation | Pydantic v2, `pydantic-settings` |
+| Database | SQLite, async SQLAlchemy, `aiosqlite`, Alembic |
+| Import/export | Standard `csv`, `openpyxl`; no pandas |
+| Quality | pytest, pytest-asyncio, Ruff, strict Pyright |
+| Deployment | Docker Compose on a Linux VM; GitHub Actions checks |
+| Backups | SQLite backup API, daily host cron, 14 local backups |
+
+## Local setup
+
+Install `uv` with the [official instructions](https://docs.astral.sh/uv/getting-started/installation/).
+Run these commands from the repository root:
+
+```sh
+uv python install 3.13
+uv sync --locked
+cp .env.example .env
+```
+
+Set `TELEGRAM_BOT_TOKEN` in `.env` to the token from Telegram BotFather. Never commit that token.
+Environment variables override `.env` values.
+
+| Variable | Default or format |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Required for bot startup; not required for migrations or backups |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./data/attendee.db` |
+| `APP_TIMEZONE` | `Asia/Singapore`; valid `zoneinfo` name |
+| `BOOTSTRAP_ADMIN_IDS` | Empty, `123,456`, or `[123,456]`; positive IDs only |
+| `LOG_LEVEL` | `INFO`; also `DEBUG`, `WARNING`, `ERROR`, `CRITICAL` |
+| `BACKUP_DIR` | `./data/backups` |
+| `SQLITE_BUSY_TIMEOUT_MS` | `5000`; positive integer |
+
+Admin ID parsing removes duplicates. These IDs do not grant permissions in this foundation.
+Database URLs must select a file through `sqlite+aiosqlite`. Memory databases and URL query parameters are unsupported.
+
+## Run locally
+
+```sh
+uv run alembic upgrade head
+uv run attendee
+```
+
+A valid token and Telegram network access are required. The bot receives updates but has no product handlers.
+Stop the bot with Ctrl-C. Run only one bot instance per token and database.
+Local startup requires the separate migration command. Docker startup runs it automatically.
+
+## Quality checks
+
+```sh
+uv sync --locked
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest
+```
+
+Use `uv run ruff format .` to apply formatting. Foundation tests use temporary databases and no real Telegram account.
+GitHub Actions runs the same checks on pushes and pull requests.
+
+## Migrations
+
+```sh
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic history
+```
+
+No migration revision exists yet. An upgrade can create Alembic's version table only.
+Add model imports to the migration environment when domain models arrive.
+Generate a revision after that change:
+
+```sh
+uv run alembic revision --autogenerate -m "Describe the schema change"
+```
+
+Review the generated revision before an upgrade. Never use `create_all()` as the production migration strategy.
+
+## Docker Compose
+
+Docker Engine and Docker Compose must be available. Create `.env` before startup.
+
+```sh
+docker compose build
+docker compose up -d
+docker compose logs -f bot
+```
+
+The container uses a non-root user. Its named volume persists `/app/data`, including SQLite and backups.
+The default relative paths resolve inside that directory because the container works from `/app`.
+Keep custom database and backup paths under `/app/data`, or provide another persistent mount.
+The final image contains runtime dependencies only. The build uses a pinned `uv` version and `uv.lock`.
+
+The entry point runs `alembic upgrade head`. It starts the bot only after migration success.
+`restart: unless-stopped` restarts the service after failure. Inspect logs if a migration repeatedly fails.
+`docker compose down` preserves the named volume. Do not use `down -v` unless data deletion is intended.
+
+## Backups
+
+Create a local backup:
+
+```sh
+uv run attendee-backup
+```
+
+Create a container backup:
+
+```sh
+docker compose exec -T bot attendee-backup
+```
+
+The command requires an existing SQLite database. It uses SQLite's safe backup API, including committed write-ahead log (WAL) data.
+It publishes a completed file before it removes older backups. It retains the latest 14 completed command-owned files.
+A file lock prevents overlapping runs. A failure produces an error log and a nonzero exit status.
+Uploaded and generated spreadsheets are not backups and never require persistent storage.
+
+Example host cron entry for 03:00 daily:
+
+```cron
+0 3 * * * cd /srv/attendee && /usr/bin/docker compose exec -T bot attendee-backup >> /srv/attendee-backup.log 2>&1
+```
+
+Replace the repository path and Docker path with the server values. Cron uses the host timezone.
+The cron account needs Docker access and permission to write the log file.
+Keep backups on the persistent volume. Local backups do not protect against loss of the server disk.
+
+### Manual restore
+
+1. Stop the bot with `docker compose stop bot`.
+2. Locate the named volume with `docker volume inspect`.
+3. Select a completed backup from its backup directory.
+4. Check the backup with SQLite `PRAGMA integrity_check` through a SQLite client or Python `sqlite3`.
+5. Preserve the current database and its `-wal` and `-shm` files together in a separate recovery directory.
+6. Copy the selected completed backup to the configured database path.
+7. Give the restored file to UID/GID `10001:10001`.
+8. Start the bot with `docker compose up -d`.
+9. Inspect the migration and startup logs.
+
+Perform these steps on the server while all database users are stopped, including cron backups.
+Do not leave old `-wal` or `-shm` files beside the restored database.
+Restore has no Telegram interface or automated command.
+
+## Deployment
+
+Prepare a Linux VM with Git, Docker, Compose, and outbound Telegram access.
+Clone the repository. Create `.env` with the server configuration. Configure the daily host cron entry.
+For updates, run:
+
+```sh
+git pull
+docker compose build
+docker compose up -d
+```
+
+Create a backup before a deployment with schema changes. Inspect `docker compose logs bot` after deployment.
+No cloud-specific service or public HTTP port is required.
 
 ## Documents
 
-- [`docs/prd.md`](docs/prd.md): product requirements (source of truth)
-- [`AGENTS.md`](AGENTS.md): rules for coding agents
-- [`docs/architecture.md`](docs/architecture.md): architecture boundaries
-- [`docs/decisions.md`](docs/decisions.md): decision log
-- [`docs/repo-map.md`](docs/repo-map.md): repository structure
+- [Product requirements](docs/prd.md): product source of truth.
+- [Agent rules](AGENTS.md): durable coding rules.
+- [Architecture](docs/architecture.md): layers, future data model, and operations.
+- [Decisions](docs/decisions.md): accepted choices and deferred product questions.
+- [Repository map](docs/repo-map.md): current files and boundaries.

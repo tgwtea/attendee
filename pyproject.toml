@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "attendee"
+version = "0.1.0"
+description = "A Telegram attendance bot foundation"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "python-telegram-bot>=22,<23",
+  "sqlalchemy[asyncio]>=2.0,<2.1",
+  "aiosqlite>=0.21,<1",
+  "alembic>=1.16,<2",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.9,<3",
+  "openpyxl>=3.1,<4",
+]
+
+[project.scripts]
+attendee = "attendee.main:main"
+attendee-backup = "attendee.backup:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.11,<1", "pyright>=1.1,<2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/attendee"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
