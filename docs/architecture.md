@@ -1,6 +1,6 @@
 # Architecture
 
-Status: runnable foundation with organization identity and authorization. Attendance features do not exist yet.
+Status: runnable bot with organization identity, namelist import, and Telegram onboarding. Attendance features do not exist yet.
 
 `docs/prd.md` defines the product. `docs/decisions.md` records the accepted stack. `AGENTS.md` defines coding rules.
 
@@ -22,9 +22,10 @@ Configuration supplies validated settings. The entry point constructs dependenci
 ## Current foundation
 
 Python 3.13 uses a `src/attendee` package and `uv` dependencies.
-The entry point loads settings, configures standard logging, constructs database dependencies, and starts an empty Telegram application.
-The application uses long polling. It registers no commands, callbacks, or conversations.
-The application checks database access before polling. It disposes the engine after shutdown or startup failure.
+The entry point loads settings, configures standard logging, and constructs database dependencies.
+It reads the organization that `BOT_ORGANIZATION` names (T33). This read also checks database access before polling.
+It constructs the application services and the Telegram handlers explicitly, then starts long polling.
+It disposes the engine after shutdown or startup failure.
 
 Future multi-step interactions use `ConversationHandler`. Telegram processes updates sequentially to preserve conversation state.
 Future handlers must keep transactions short. Spreadsheet work must not block the event loop.
@@ -65,10 +66,13 @@ Matching (`application/matching.py`): `AccountMatchingService.match(organization
 
 1. A member with the Telegram ID matches. The service stores the current handle.
 2. A Telegram ID that belongs to a person outside the organization binds nothing.
-3. Otherwise, exactly one member without a Telegram ID and with the canonical handle gets the ID.
+3. Otherwise, exactly one member without a Telegram ID and with the canonical handle is a proposed candidate. The service binds nothing yet (T31).
 4. Zero or several candidates bind nothing.
 
+`confirm(..., person_id)` matches again in one write transaction. It binds the Telegram ID only if the fresh result proposes the same person (T34).
+`reject(...)` records the reason `candidate_rejected` (T35).
 Every case that binds nothing records an `unresolved_matches` row for admin resolution.
+The preview warns when a row to create has the name of an existing member (T32). The warning never blocks, matches, or merges.
 
 [ACE LOGIC]
 Every import targets an organization.
@@ -76,6 +80,26 @@ If a row has no name then the import rejects the row.
 If an import contains a rejected row then the import applies no row.
 If a Telegram account matches no member of an organization then the matching service binds no person.
 If a Telegram account matches more than one member of an organization then the matching service records an unresolved match.
+If a Telegram account matches a member by handle then the bot asks the account to confirm the name.
+If an account rejects a name then the matching service binds no person.
+If a callback repeats then the bot applies no extra effect.
+
+## Telegram handlers (implemented)
+
+The bot handles private chats only. Each handler translates between Telegram and one application service. Business rules stay in the services.
+
+| Handler | Trigger | Service calls |
+| --- | --- | --- |
+| `OnboardingHandlers.start` | `/start` | `AccountMatchingService.match` |
+| `OnboardingHandlers.answer` | `m:y:<org>:<person>`, `m:n:<org>:<person>` | `confirm` or `reject` |
+| `UploadHandlers.document` | A document | `IdentityService`, `AuthorizationService.require_role`, `parse_file`, `ImportService.preview` |
+| `UploadHandlers.button` | `i:a:<token>`, `i:c:<token>` | `AuthorizationService.require_role`, `ImportService.apply` |
+
+- A member sees the candidate name only. The bot never shows another member's handle, Telegram ID, or an unresolved reason.
+- No match, an ambiguous match, a taken Telegram ID, and a rejection all show the PRD §34 "User not found" text.
+- `PendingImports` keeps one preview per admin in memory (T37). A restart cancels it.
+- The bot splits a long preview into messages of at most 4,096 characters. Only the last message carries the buttons.
+- `reporting/imports.py` formats the preview text for the bot and for `attendee-import`.
 
 ## Future organization model
 
@@ -128,7 +152,7 @@ Application operations use short transactions and separate sessions. Do not shar
 
 Alembic owns schema changes. Its async environment imports the project metadata and shares the engine configuration.
 `alembic/env.py` imports `attendee.persistence.models` before it reads the metadata.
-Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revisions use plain SQLAlchemy types.
+Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revision `0003_candidate_rejected` adds the `candidate_rejected` reason. Revisions use plain SQLAlchemy types.
 `write_session()` starts a transaction with `BEGIN IMMEDIATE`. Use it for an operation that reads and then writes.
 SQLite stores timestamps as naive UTC. The `UTCDateTime` column type rejects naive input and returns aware UTC values.
 Review generated revisions before deployment. Never use runtime `create_all()`.
@@ -142,7 +166,7 @@ Export failure must never change committed attendance data.
 
 CSV imports use Python's `csv` module. XLSX imports and exports use `openpyxl`. Do not add pandas.
 
-The import pipeline (parse, validate, preview, confirm, apply) exists. A Telegram upload handler does not exist yet.
+The import pipeline (parse, validate, preview, confirm, apply) exists. An admin uses it through `attendee-import` or a Telegram document upload.
 Never match by name. Send ambiguous matches to admin resolution.
 
 A future reasons export gives each member one comma-separated cell (decision P15).

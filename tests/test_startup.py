@@ -6,13 +6,38 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from attendee.config.settings import Settings
+from attendee.application.dto import OrganizationDTO
+from attendee.config.settings import ConfigurationError, Settings
 from attendee.logging import SecretFormatter
-from attendee.main import run
+from attendee.main import create_handlers, run
 from attendee.telegram.bootstrap import build_application
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "123456789:abcdefghijklmnopqrstuvwxyzABCDEFGHI"
+ORGANIZATION = "club"
+
+
+def bot_settings(**values):
+    return Settings(telegram_bot_token=TOKEN, bot_organization=ORGANIZATION, **values)
+
+
+@pytest.fixture
+def organization_found(monkeypatch):
+    async def load(_factory, slug):
+        return OrganizationDTO(id=1, slug=slug, name="Club", created_at="2026-10-04T00:00:00Z")
+
+    monkeypatch.setattr("attendee.main.load_organization", load)
+
+
+def test_registered_handlers():
+    application = build_application(TOKEN, create_handlers(Mock(), 1))
+    names = [type(handler).__name__ for handler in application.handlers[0]]
+    assert names == [
+        "CommandHandler",
+        "CallbackQueryHandler",
+        "MessageHandler",
+        "CallbackQueryHandler",
+    ]
 
 
 def test_empty_application():
@@ -23,31 +48,51 @@ def test_empty_application():
         assert application.job_queue is None
 
 
-def test_shutdown_disposes_engine(monkeypatch):
+def test_shutdown_disposes_engine(monkeypatch, organization_found):
     engine = Mock()
     engine.dispose = AsyncMock()
     application = Mock()
     monkeypatch.setattr("attendee.main.create_engine", lambda _: engine)
     monkeypatch.setattr("attendee.main.create_session_factory", lambda _: Mock())
-    monkeypatch.setattr("attendee.main.build_application", lambda _: application)
-    run(Settings(telegram_bot_token=TOKEN))
+    monkeypatch.setattr("attendee.main.build_application", lambda *_: application)
+    run(bot_settings())
     engine.dispose.assert_awaited_once()
     application.run_polling.assert_called_once_with(close_loop=False, bootstrap_retries=0)
 
 
-def test_startup_failure_disposes_engine(monkeypatch):
+def test_startup_failure_disposes_engine(monkeypatch, organization_found):
     engine = Mock()
     engine.dispose = AsyncMock()
     monkeypatch.setattr("attendee.main.create_engine", lambda _: engine)
     monkeypatch.setattr("attendee.main.create_session_factory", lambda _: Mock())
 
-    def fail(_):
+    def fail(*_):
         raise RuntimeError("startup failed")
 
     monkeypatch.setattr("attendee.main.build_application", fail)
     with pytest.raises(RuntimeError):
-        run(Settings(telegram_bot_token=TOKEN))
+        run(bot_settings())
     engine.dispose.assert_awaited_once()
+
+
+def test_unknown_organization_stops_startup(migrated_settings, monkeypatch):
+    build = Mock()
+    monkeypatch.setattr("attendee.main.build_application", build)
+    settings = bot_settings(database_url=migrated_settings.database_url)
+    with pytest.raises(ConfigurationError, match="attendee-setup"):
+        run(settings)
+    build.assert_not_called()
+
+
+def test_missing_organization_exits():
+    result = subprocess.run(
+        [str(ROOT / ".venv/bin/attendee")],
+        env={**os.environ, "TELEGRAM_BOT_TOKEN": TOKEN},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "BOT_ORGANIZATION is required" in result.stderr
 
 
 def test_missing_token_exits():
@@ -80,7 +125,16 @@ def test_entrypoint_does_not_start_bot_after_migration_failure(tmp_path):
     assert not marker.exists()
 
 
-def test_real_polling_lifecycle_with_fake_transport(monkeypatch, tmp_path):
+def test_real_polling_lifecycle_with_fake_transport(monkeypatch, migrated_settings):
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(migrated_settings.database_path)) as connection:
+        connection.execute(
+            "INSERT INTO organizations (slug, name, created_at) "
+            "VALUES ('club', 'Club', '2026-10-04 00:00:00')"
+        )
+        connection.commit()
     import asyncio
     import json
 
@@ -133,11 +187,8 @@ def test_real_polling_lifecycle_with_fake_transport(monkeypatch, tmp_path):
         .job_queue(None)
         .build()
     )
-    monkeypatch.setattr("attendee.main.build_application", lambda _: application)
-    settings = Settings(
-        telegram_bot_token=TOKEN,
-        database_url=f"sqlite+aiosqlite:///{tmp_path / 'lifecycle.db'}",
-    )
+    monkeypatch.setattr("attendee.main.build_application", lambda *_: application)
+    settings = bot_settings(database_url=migrated_settings.database_url)
     run(settings)
     assert {"getMe", "deleteWebhook", "getUpdates"} <= set(requests)
     assert all(transport.closed for transport in transports)

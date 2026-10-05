@@ -20,6 +20,7 @@ def isolated_environment(monkeypatch, tmp_path):
         "LOG_LEVEL",
         "BACKUP_DIR",
         "SQLITE_BUSY_TIMEOUT_MS",
+        "BOT_ORGANIZATION",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)

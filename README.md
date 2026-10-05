@@ -6,7 +6,8 @@ Attendee is a Telegram attendance bot foundation. SMU Samba Masala is the initia
 
 The bot supports configuration, logging, SQLite connections, migrations, local backups, and organization identity.
 The schema holds organizations, people, and organization memberships with `member` and `admin` roles.
-Attendance features do not exist yet. The bot registers no commands, buttons, conversations, or report logic.
+In a private chat, `/start` links a member's Telegram account, and an admin can upload a namelist.
+Attendance features do not exist yet.
 
 ## Stack
 
@@ -41,6 +42,7 @@ Environment variables override `.env` values.
 | `DATABASE_URL` | `sqlite+aiosqlite:///./data/attendee.db` |
 | `APP_TIMEZONE` | `Asia/Singapore`; valid `zoneinfo` name |
 | `BOOTSTRAP_ADMIN_IDS` | Empty, `123,456`, or `[123,456]`; positive IDs only |
+| `BOT_ORGANIZATION` | Organization slug that the bot serves; required for bot startup |
 | `LOG_LEVEL` | `INFO`; also `DEBUG`, `WARNING`, `ERROR`, `CRITICAL` |
 | `BACKUP_DIR` | `./data/backups` |
 | `SQLITE_BUSY_TIMEOUT_MS` | `5000`; positive integer |
@@ -56,7 +58,7 @@ uv run attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
 uv run attendee
 ```
 
-A valid token and Telegram network access are required. The bot receives updates but has no product handlers.
+A valid token, `BOT_ORGANIZATION`, and Telegram network access are required. Startup fails if no organization has that slug.
 Stop the bot with Ctrl-C. Run only one bot instance per token and database.
 Local startup requires the separate migration command. Docker startup runs it automatically.
 
@@ -83,6 +85,7 @@ uv run alembic history
 
 Revision `0001_identity` adds the `organizations`, `people`, and `memberships` tables.
 Revision `0002_import_matching` adds `unresolved_matches` and the `people.telegram_handle` index. It converts stored handles to lowercase without `@`. It sets a handle that Telegram would reject to `NULL`.
+Revision `0003_candidate_rejected` adds the `candidate_rejected` unresolved reason. It copies the `unresolved_matches` table and keeps every row. Its downgrade changes those rows to `no_match`.
 An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
 `uv run alembic downgrade base` drops every table and its data.
 Add new model modules to the import in `alembic/env.py`. Generate a revision after a model change:
@@ -131,6 +134,24 @@ uv run attendee-import --organization smu-samba-masala --apply namelist.csv  # w
 - New people get the `member` role. The command never stores the file.
 
 In Docker, copy the file into the container first, then run `docker compose exec -T bot attendee-import ...`.
+
+### Upload through Telegram
+
+1. Open a private chat with the bot as an admin of the `BOT_ORGANIZATION` organization.
+2. Send the namelist as a `.csv` or `.xlsx` document of at most 5 MB.
+3. Read the preview. It shows counts, ignored columns, rejected rows, and duplicate-name warnings.
+4. Press Apply or Cancel.
+
+A preview with a rejected row has no Apply button. A bot restart cancels a pending preview. The bot never stores the file.
+A duplicate-name warning means that a new row has the name of an existing member. Check it before you apply. Keep a `Telegram ID` column in the file to avoid a duplicate after a handle change.
+
+## Member onboarding
+
+A member sends `/start` to the bot in a private chat.
+
+- A linked Telegram account gets a confirmation only.
+- If the Telegram handle matches one namelist entry, the bot asks "Are you <name>?". Yes links the account. No links nothing.
+- In every other case, the bot asks the member to contact an admin. The bot records an unresolved match for the admin.
 
 ## Docker Compose
 

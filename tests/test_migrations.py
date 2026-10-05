@@ -3,6 +3,7 @@ import sqlite3
 import subprocess
 from contextlib import closing
 
+import pytest
 from conftest import ROOT, run_alembic
 
 IDENTITY_TABLES = {"organizations", "people", "memberships", "unresolved_matches"}
@@ -23,7 +24,7 @@ def test_fresh_and_repeated_upgrade(tmp_path):
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            ("0002_import_matching",)
+            ("0003_candidate_rejected",)
         ]
 
 
@@ -82,7 +83,7 @@ def test_failed_revision_rolls_back_schema(tmp_path):
     (scripts / "versions" / "failure.py").write_text(
         "from alembic import op\n"
         'revision = "failure"\n'
-        'down_revision = "0002_import_matching"\n'
+        'down_revision = "0003_candidate_rejected"\n'
         "def upgrade():\n"
         '    op.execute("CREATE TABLE migration_probe (id INTEGER)")\n'
         '    raise RuntimeError("deliberate migration failure")\n'
@@ -112,3 +113,34 @@ def test_failed_revision_rolls_back_schema(tmp_path):
             connection.execute("SELECT name FROM sqlite_master WHERE name='people'").fetchall()
             == []
         )
+
+
+def test_candidate_rejected_reason_upgrade_and_downgrade(tmp_path):
+    database = tmp_path / "reason.db"
+    assert run_alembic(database, "upgrade", "0002_import_matching").returncode == 0
+    insert = (
+        "INSERT INTO unresolved_matches (organization_id, telegram_user_id, reason, "
+        "created_at, updated_at) VALUES (1, ?, ?, '2026-10-04 00:00:00', '2026-10-04 00:00:00')"
+    )
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "INSERT INTO organizations (slug, name, created_at) "
+            "VALUES ('club', 'Club', '2026-10-04 00:00:00')"
+        )
+        connection.execute(insert, (5, "ambiguous"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (6, "candidate_rejected"))
+        connection.commit()
+    result = run_alembic(database, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(insert, (6, "candidate_rejected"))
+        connection.commit()
+    result = run_alembic(database, "downgrade", "0002_import_matching")
+    assert result.returncode == 0, result.stderr
+    with closing(sqlite3.connect(database)) as connection:
+        rows = connection.execute(
+            "SELECT telegram_user_id, reason FROM unresolved_matches ORDER BY id"
+        ).fetchall()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert rows == [(5, "ambiguous"), (6, "no_match")]

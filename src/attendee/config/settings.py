@@ -11,6 +11,12 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from attendee.domain.identity import validate_slug
+
+
+class ConfigurationError(ValueError):
+    """A startup setting is missing or wrong. The message holds no secret value."""
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
@@ -22,6 +28,8 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     backup_dir: Path = Path("./data/backups")
     sqlite_busy_timeout_ms: int = Field(default=5000, gt=0)
+    # The organization slug that this bot deployment serves (decision T33).
+    bot_organization: str | None = None
 
     @field_validator("bootstrap_admin_ids", mode="before")
     @classmethod
@@ -68,6 +76,12 @@ class Settings(BaseSettings):
             raise ValueError("Use a file-backed sqlite+aiosqlite URL without query parameters")
         return value
 
+    @field_validator("bot_organization")
+    @classmethod
+    def validate_bot_organization(cls, value: str | None) -> str | None:
+        value = None if value is None else value.strip()
+        return validate_slug(value) if value else None
+
     @field_validator("app_timezone")
     @classmethod
     def validate_timezone(cls, value: str) -> str:
@@ -88,3 +102,8 @@ class Settings(BaseSettings):
         if token is None or not token.get_secret_value().strip():
             raise ValueError("TELEGRAM_BOT_TOKEN is required for bot startup")
         return token.get_secret_value().strip()
+
+    def require_bot_organization(self) -> str:
+        if self.bot_organization is None:
+            raise ConfigurationError("BOT_ORGANIZATION is required for bot startup")
+        return self.bot_organization

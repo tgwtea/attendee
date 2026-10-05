@@ -30,6 +30,12 @@ class MatchResult:
     reason: UnresolvedReason | None = None
 
 
+def _checked_input(telegram_user_id: int, telegram_handle: str | None) -> str | None:
+    if telegram_user_id <= 0:
+        raise ValueError("A Telegram user ID must be positive")
+    return _canonical_or_none(telegram_handle)
+
+
 def _canonical_or_none(telegram_handle: str | None) -> str | None:
     if telegram_handle is None or not telegram_handle.strip():
         return None
@@ -48,50 +54,39 @@ class AccountMatchingService:
     ) -> MatchResult:
         """Match by Telegram user ID first, then by canonical handle, in this organization only.
 
+        A Telegram ID match returns BY_TELEGRAM_ID. A single handle candidate returns PROPOSED
+        and binds nothing: the member must confirm the candidate name first (T31).
         Matching never uses a name and never creates a membership. If no single member matches,
         the service binds nothing and records an unresolved match for admin resolution.
         A repeated call with the same input has no extra effect.
         """
-        if telegram_user_id <= 0:
-            raise ValueError("A Telegram user ID must be positive")
-        handle = _canonical_or_none(telegram_handle)
+        handle = _checked_input(telegram_user_id, telegram_handle)
         async with write_session(self.session_factory) as session:
-            if await OrganizationRepository(session).get(organization_id) is None:
-                raise NotFound(f"Organization {organization_id}")
-            memberships = MembershipRepository(session)
+            return await self._match(session, organization_id, telegram_user_id, handle)
+
+    async def confirm(
+        self,
+        organization_id: int,
+        telegram_user_id: int,
+        telegram_handle: str | None,
+        person_id: int,
+    ) -> MatchResult:
+        """Bind the Telegram ID to the confirmed candidate if the match still proposes it.
+
+        One write transaction matches again and binds. A changed state binds nothing and returns
+        the fresh result: BY_TELEGRAM_ID, UNRESOLVED, or PROPOSED for another candidate.
+        A repeated confirmation returns BY_TELEGRAM_ID and has no extra effect.
+        """
+        handle = _checked_input(telegram_user_id, telegram_handle)
+        async with write_session(self.session_factory) as session:
+            result = await self._match(session, organization_id, telegram_user_id, handle)
+            if result.outcome is not MatchOutcome.PROPOSED or result.person is None:
+                return result
+            if result.person.id != person_id:
+                return result
+            person = await PersonRepository(session).get(person_id)
+            assert person is not None
             unresolved = UnresolvedMatchRepository(session)
-
-            person = await PersonRepository(session).get_by_telegram_user_id(telegram_user_id)
-            if person is not None:
-                if await memberships.get(organization_id, person.id) is None:
-                    return await self._unresolved(
-                        unresolved,
-                        organization_id,
-                        telegram_user_id,
-                        handle,
-                        UnresolvedReason.TELEGRAM_ID_TAKEN,
-                    )
-                if person.telegram_handle != handle:
-                    person.telegram_handle = handle
-                await self._resolve(unresolved, organization_id, telegram_user_id)
-                await session.flush()
-                return MatchResult(MatchOutcome.BY_TELEGRAM_ID, PersonDTO.model_validate(person))
-
-            if handle is None:
-                return await self._unresolved(
-                    unresolved,
-                    organization_id,
-                    telegram_user_id,
-                    None,
-                    UnresolvedReason.NO_MATCH,
-                )
-            candidates = await memberships.find_unbound_people_by_handle(organization_id, handle)
-            if len(candidates) != 1:
-                reason = UnresolvedReason.AMBIGUOUS if candidates else UnresolvedReason.NO_MATCH
-                return await self._unresolved(
-                    unresolved, organization_id, telegram_user_id, handle, reason
-                )
-            person = candidates[0]
             try:
                 async with session.begin_nested():
                     person.telegram_user_id = telegram_user_id
@@ -112,6 +107,71 @@ class AccountMatchingService:
                 organization_id,
             )
             return MatchResult(MatchOutcome.BOUND_BY_HANDLE, PersonDTO.model_validate(person))
+
+    async def reject(
+        self, organization_id: int, telegram_user_id: int, telegram_handle: str | None
+    ) -> MatchResult:
+        """Record that the member rejected the proposed candidate. Bind nothing.
+
+        A Telegram ID that already matches a member returns BY_TELEGRAM_ID and changes nothing.
+        A repeated rejection has no extra effect.
+        """
+        handle = _checked_input(telegram_user_id, telegram_handle)
+        async with write_session(self.session_factory) as session:
+            result = await self._match(session, organization_id, telegram_user_id, handle)
+            if result.outcome is not MatchOutcome.PROPOSED:
+                return result
+            return await self._unresolved(
+                UnresolvedMatchRepository(session),
+                organization_id,
+                telegram_user_id,
+                handle,
+                UnresolvedReason.CANDIDATE_REJECTED,
+            )
+
+    async def _match(
+        self,
+        session: AsyncSession,
+        organization_id: int,
+        telegram_user_id: int,
+        handle: str | None,
+    ) -> MatchResult:
+        if await OrganizationRepository(session).get(organization_id) is None:
+            raise NotFound(f"Organization {organization_id}")
+        memberships = MembershipRepository(session)
+        unresolved = UnresolvedMatchRepository(session)
+
+        person = await PersonRepository(session).get_by_telegram_user_id(telegram_user_id)
+        if person is not None:
+            if await memberships.get(organization_id, person.id) is None:
+                return await self._unresolved(
+                    unresolved,
+                    organization_id,
+                    telegram_user_id,
+                    handle,
+                    UnresolvedReason.TELEGRAM_ID_TAKEN,
+                )
+            if person.telegram_handle != handle:
+                person.telegram_handle = handle
+            await self._resolve(unresolved, organization_id, telegram_user_id)
+            await session.flush()
+            return MatchResult(MatchOutcome.BY_TELEGRAM_ID, PersonDTO.model_validate(person))
+
+        if handle is None:
+            return await self._unresolved(
+                unresolved,
+                organization_id,
+                telegram_user_id,
+                None,
+                UnresolvedReason.NO_MATCH,
+            )
+        candidates = await memberships.find_unbound_people_by_handle(organization_id, handle)
+        if len(candidates) != 1:
+            reason = UnresolvedReason.AMBIGUOUS if candidates else UnresolvedReason.NO_MATCH
+            return await self._unresolved(
+                unresolved, organization_id, telegram_user_id, handle, reason
+            )
+        return MatchResult(MatchOutcome.PROPOSED, PersonDTO.model_validate(candidates[0]))
 
     async def list_unresolved(self, organization_id: int) -> list[UnresolvedMatchDTO]:
         async with self.session_factory() as session:

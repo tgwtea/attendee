@@ -5,6 +5,7 @@ from enum import StrEnum
 
 class MatchOutcome(StrEnum):
     BY_TELEGRAM_ID = "by_telegram_id"
+    PROPOSED = "proposed"
     BOUND_BY_HANDLE = "bound_by_handle"
     UNRESOLVED = "unresolved"
 
@@ -15,3 +16,4 @@ class UnresolvedReason(StrEnum):
     NO_MATCH = "no_match"
     AMBIGUOUS = "ambiguous"
     TELEGRAM_ID_TAKEN = "telegram_id_taken"
+    CANDIDATE_REJECTED = "candidate_rejected"

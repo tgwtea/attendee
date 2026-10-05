@@ -54,6 +54,15 @@ class RowPlan:
 
 
 @dataclass(frozen=True)
+class DuplicateNameWarning:
+    """A row to create has the name of an existing member. It never blocks or merges (T32)."""
+
+    line: int
+    name: str
+    person_id: int
+
+
+@dataclass(frozen=True)
 class ImportPreview:
     """A full plan for one file and one organization state. Equal state gives an equal preview."""
 
@@ -61,6 +70,7 @@ class ImportPreview:
     parsed: ParsedFile
     plans: tuple[RowPlan, ...]
     members: tuple[MemberSnapshot, ...]
+    duplicate_name_warnings: tuple[DuplicateNameWarning, ...] = ()
 
     def _with(self, action: RowAction) -> tuple[RowPlan, ...]:
         return tuple(plan for plan in self.plans if plan.action is action)
@@ -158,8 +168,30 @@ async def _build_preview(
         for person in await PersonRepository(session).list_by_telegram_user_ids(file_telegram_ids)
         if person.id not in member_ids
     }
-    plans = [_plan_row(row, members, outside_ids) for row in parsed.rows]
-    return ImportPreview(organization_id, parsed, _reject_shared_targets(plans), members)
+    plans = _reject_shared_targets([_plan_row(row, members, outside_ids) for row in parsed.rows])
+    return ImportPreview(
+        organization_id, parsed, plans, members, _duplicate_name_warnings(plans, members)
+    )
+
+
+def _name_key(name: str | None) -> str:
+    return " ".join((name or "").split()).casefold()
+
+
+def _duplicate_name_warnings(
+    plans: tuple[RowPlan, ...], members: tuple[MemberSnapshot, ...]
+) -> tuple[DuplicateNameWarning, ...]:
+    """Warn when a row to create has the name of an existing member. Never match by name."""
+    by_name: defaultdict[str, list[int]] = defaultdict(list)
+    for member in members:
+        if member.display_name is not None:
+            by_name[_name_key(member.display_name)].append(member.person_id)
+    return tuple(
+        DuplicateNameWarning(plan.row.line, plan.row.name or "", person_id)
+        for plan in plans
+        if plan.action is RowAction.CREATE
+        for person_id in by_name.get(_name_key(plan.row.name), [])
+    )
 
 
 def _plan_row(

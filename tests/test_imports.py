@@ -255,6 +255,23 @@ async def test_import_is_isolated_per_organization(service, organization, sessio
     assert await counts(session_factory) == (6, 6)
 
 
+async def test_duplicate_name_warning_never_blocks(service, organization, session_factory):
+    await service.apply(await service.preview(organization.id, parse_csv(csv_bytes(NAMELIST))))
+    rows = [["Sarah  LIM", "@sarah_new"], ["Sarah Lim", "@sarahlim"], ["New Person", "@newbie"]]
+    preview = await service.preview(organization.id, parse_csv(csv_bytes(rows)))
+    assert [plan.action for plan in preview.plans] == [
+        RowAction.CREATE,
+        RowAction.UNCHANGED,
+        RowAction.CREATE,
+    ]
+    [warning] = preview.duplicate_name_warnings
+    assert (warning.line, warning.name) == (2, "Sarah  LIM")
+    result = await service.apply(preview)
+    # The warning never matches or merges: the import creates a second person.
+    assert (result.created, result.unchanged) == (2, 1)
+    assert await counts(session_factory) == (5, 5)
+
+
 def test_import_command_previews_then_applies(migrated_settings, tmp_path, monkeypatch, capsys):
     database = migrated_settings.database_path
     with closing(sqlite3.connect(database)) as connection:
@@ -277,6 +294,10 @@ def test_import_command_previews_then_applies(migrated_settings, tmp_path, monke
     main(["--organization", "club", "--apply", str(path)])
     assert "Applied." in capsys.readouterr().out
     assert member_count() == 3
+    renamed = tmp_path / "renamed.csv"
+    renamed.write_bytes(csv_bytes([["Sarah Lim", "@sarah_new"]]))
+    main(["--organization", "club", str(renamed)])
+    assert "warning row 2: an existing member is also named Sarah Lim" in capsys.readouterr().out
     bad = tmp_path / "bad.csv"
     bad.write_bytes(csv_bytes([["", "@nobody"]]))
     with pytest.raises(SystemExit) as exit_info:

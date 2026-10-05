@@ -149,5 +149,6 @@ The accepted stack is in `docs/decisions.md`. Do not reopen those choices withou
 
 The identity phase adds organizations, people, memberships, roles, authorization, and `attendee-setup`.
 The import phase adds namelist import (`attendee-import`), Telegram account matching, and unresolved matches.
-No product handlers, attendance models, or report logic exist yet.
+The onboarding phase adds `/start` account matching with name confirmation and namelist upload through Telegram.
+No attendance models, attendance handlers, or report logic exist yet.
 Document future concepts without speculative feature code.

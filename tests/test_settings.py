@@ -55,6 +55,7 @@ def test_environment_overrides_dotenv(monkeypatch, tmp_path):
         {"database_url": "sqlite+aiosqlite:///:memory:"},
         {"database_url": "sqlite+aiosqlite:///a.db?mode=ro"},
         {"sqlite_busy_timeout_ms": 0},
+        {"bot_organization": "Not A Slug"},
     ],
 )
 def test_invalid_settings(values):
@@ -69,3 +70,12 @@ def test_secret_hidden():
     with pytest.raises(ValidationError) as exc:
         Settings(log_level="secret-invalid-value")
     assert "secret-invalid-value" not in str(exc.value)
+
+
+def test_bot_organization(monkeypatch):
+    with pytest.raises(ValueError, match="BOT_ORGANIZATION"):
+        Settings().require_bot_organization()
+    monkeypatch.setenv("BOT_ORGANIZATION", " smu-samba-masala ")
+    assert Settings().require_bot_organization() == "smu-samba-masala"
+    monkeypatch.setenv("BOT_ORGANIZATION", "")
+    assert Settings().bot_organization is None

@@ -12,6 +12,7 @@ from attendee.config.settings import Settings
 from attendee.domain.imports import ImportFileError, ParsedFile
 from attendee.logging import configure_logging
 from attendee.persistence.database import create_engine, create_session_factory
+from attendee.reporting.imports import format_preview
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,27 +34,6 @@ async def run_import(
         return preview, await service.apply(preview)
     finally:
         await engine.dispose()
-
-
-def format_preview(preview: ImportPreview) -> str:
-    lines = [
-        f"Create: {len(preview.to_create)}",
-        f"Update: {len(preview.to_update)}",
-        f"Unchanged: {len(preview.unchanged)}",
-        f"Rejected: {len(preview.rejected)}",
-        f"Members not in file (left unchanged): {len(preview.not_in_file)}",
-    ]
-    if preview.ignored_columns:
-        lines.append(f"Ignored columns: {', '.join(preview.ignored_columns)}")
-    for label, plans in (("create", preview.to_create), ("update", preview.to_update)):
-        lines.extend(
-            f"  {label} row {plan.row.line}: {plan.row.name} @{plan.row.telegram_handle}"
-            for plan in plans
-        )
-    lines.extend(
-        f"  reject row {plan.row.line}: {'; '.join(plan.reasons)}" for plan in preview.rejected
-    )
-    return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> None:

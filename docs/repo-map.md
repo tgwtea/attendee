@@ -25,7 +25,8 @@ Update this file when the repository structure changes.
 │   └── versions/
 │       ├── README.md
 │       ├── 0001_identity.py
-│       └── 0002_import_matching.py
+│       ├── 0002_import_matching.py
+│       └── 0003_candidate_rejected.py
 ├── scripts/entrypoint.sh
 ├── src/attendee/
 │   ├── __init__.py
@@ -39,7 +40,10 @@ Update this file when the repository structure changes.
 │   │   └── settings.py
 │   ├── telegram/
 │   │   ├── __init__.py
-│   │   └── bootstrap.py
+│   │   ├── bootstrap.py
+│   │   ├── messages.py
+│   │   ├── onboarding.py
+│   │   └── uploads.py
 │   ├── persistence/
 │   │   ├── __init__.py
 │   │   ├── base.py
@@ -67,7 +71,9 @@ Update this file when the repository structure changes.
 │   │   ├── __init__.py
 │   │   ├── identity.py
 │   │   └── matching.py
-│   └── reporting/__init__.py
+│   └── reporting/
+│       ├── __init__.py
+│       └── imports.py
 ├── tests/
 │   ├── conftest.py
 │   ├── test_settings.py
@@ -78,7 +84,10 @@ Update this file when the repository structure changes.
 │   ├── test_identity.py
 │   ├── test_bootstrap.py
 │   ├── test_imports.py
-│   └── test_matching.py
+│   ├── test_matching.py
+│   ├── test_onboarding.py
+│   ├── test_uploads.py
+│   └── telegram_fakes.py
 └── docs/
     ├── prd.md
     ├── architecture.md
@@ -98,11 +107,11 @@ Update this file when the repository structure changes.
 | `.env.example`, `.gitignore`, `.dockerignore` | Example settings and local/build exclusions |
 | `.github/workflows/ci.yml` | Automated dependency, lint, format, type, and test checks |
 | `Dockerfile`, `compose.yaml`, `scripts/entrypoint.sh` | Container build, persistent volume, and migration-first startup |
-| `alembic.ini`, `alembic/` | Async migrations; `0001_identity` and `0002_import_matching` revisions |
+| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, and `0003_candidate_rejected` revisions |
 | `src/attendee/main.py` | Explicit dependency construction and bot lifecycle |
 | `src/attendee/config/` | Validated environment settings |
 | `src/attendee/logging.py` | Standard logs with token redaction |
-| `src/attendee/telegram/` | Empty long-polling application construction |
+| `src/attendee/telegram/` | Long-polling application, `/start` onboarding, namelist upload, fixed texts |
 | `src/attendee/persistence/` | ORM metadata and identity models, UTC column type, SQLite engine, session factory |
 | `src/attendee/domain/` | Membership roles, slug and handle rules, import row validation, match outcomes |
 | `src/attendee/application/` | Identity, membership, authorization, bootstrap, import, and matching operations; DTOs; errors |
@@ -110,8 +119,8 @@ Update this file when the repository structure changes.
 | `src/attendee/setup.py` | `attendee-setup` command for bootstrap admins |
 | `src/attendee/importer.py` | `attendee-import` command: preview or apply a namelist |
 | `src/attendee/backup.py` | Safe local backups and retention |
-| `reporting/` | Package boundary only; no feature code |
-| `tests/` | Foundation and identity tests with temporary migrated databases and no live Telegram account |
+| `reporting/` | Plain-text import preview for admins |
+| `tests/` | Tests with temporary migrated databases and fake Telegram updates; no live Telegram account |
 
 Local `.venv/`, `.env`, caches, and `data/` are ignored. Docker stores runtime data in a named volume.
-No attendance models, product handlers, or export logic exist.
+No attendance models, attendance handlers, or export logic exist.

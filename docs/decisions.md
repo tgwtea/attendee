@@ -62,8 +62,13 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T28 | Unresolved matches | Table `unresolved_matches` keeps one record per organization and Telegram user ID, with a reason: `no_match`, `ambiguous`, or `telegram_id_taken`. A repeated call changes nothing. A later successful match sets `resolved_at`. The record grants no access. |
 | T29 | Write transactions take the lock at start | `write_session()` issues `BEGIN IMMEDIATE`. A second writer waits for the busy timeout and does not fail on a lock upgrade. The import apply and account matching use it. |
 | T30 | Stale preview detection | `apply` builds the preview again inside the write transaction. If it differs from the confirmed preview, the import applies nothing and raises `ImportConflict`. A rejected row raises `ImportRejected` and applies nothing. |
-| T31 | A handle match needs member confirmation | Matching by handle proposes one candidate. The bot asks the member to confirm the candidate name. It binds the Telegram ID only after confirmation. A rejection records an unresolved match. The name confirms a match; it never finds one. A Telegram ID match needs no confirmation. Implement in the Telegram onboarding phase. |
+| T31 | A handle match needs member confirmation | Matching by handle proposes one candidate. The bot asks the member to confirm the candidate name. It binds the Telegram ID only after confirmation. A rejection records an unresolved match. The name confirms a match; it never finds one. A Telegram ID match needs no confirmation. Implemented by `AccountMatchingService.match`, `confirm`, and `reject` (T34). |
 | T32 | Import warns about a possible duplicate | The preview warns when a row to create has the same name as an existing member of the organization. The warning never blocks, matches, or merges. Admins keep a `Telegram ID` column in their namelist files to avoid duplicates after a handle change. |
+| T33 | One organization per bot deployment | Setting `BOT_ORGANIZATION=<slug>` selects the organization for `/start` and uploads. Bot startup fails if the setting is empty or no organization has the slug. Services keep an explicit organization ID. Registered organization chats (T11) stay deferred. No migration. |
+| T34 | Stateless handle confirmation | `match` returns `PROPOSED` and binds nothing. The Yes and No buttons carry `m:y:<organization ID>:<person ID>` or `m:n:...`. `confirm` matches again in one `BEGIN IMMEDIATE` transaction and binds only if the fresh result proposes the same person. Otherwise it returns the fresh result. No proposal is stored, so a button still works after a restart. A repeated answer has no extra effect. |
+| T35 | Rejected candidate reason | A "No" records the unresolved reason `candidate_rejected`. Revision `0003_candidate_rejected` widens the `unresolved_matches.reason` CHECK constraint. The downgrade converts those rows to `no_match`. |
+| T36 | Telegram upload limits | The bot accepts a private-chat document named `.csv` or `.xlsx`, at most 5 MB. It checks the declared size before download. It downloads into memory, parses in a worker thread, and never writes the file to disk. Only an admin of the configured organization can upload. |
+| T37 | In-memory import preview | The bot keeps one pending preview per admin in memory, keyed by a random token in `i:a:<token>` (Apply) or `i:c:<token>` (Cancel). A new upload replaces the old preview. Apply or Cancel removes the preview before any database work. A restart, a repeated button, or an unknown token answers "This preview expired. Upload the file again." Apply checks the admin role again. A preview with a rejected row has no Apply button. |
 
 ## Foundation defaults
 
@@ -82,5 +87,7 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 These questions do not block the identity phase. Do not settle them through an implementation assumption.
 
 None.
+
+Resolved on 2026-10-05: organization context in a private chat (T33), confirmation storage (T34), the rejection reason (T35), upload limits (T36), and preview storage (T37).
 
 Resolved on 2026-10-04: the percentage denominator (P13), public reminder counts (P14), bootstrap admin membership (T21), the reasons cell (P15), the incomplete replacement reason (P16), handle confirmation (T31), and duplicate warnings after a handle change (T32).
