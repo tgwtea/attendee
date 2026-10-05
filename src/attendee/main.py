@@ -6,6 +6,7 @@ import logging
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from attendee.application.attendance import AttendanceService
 from attendee.application.authorization import AuthorizationService
 from attendee.application.dto import OrganizationDTO
 from attendee.application.identity import IdentityService
@@ -15,6 +16,7 @@ from attendee.application.organizations import OrganizationService
 from attendee.config.settings import ConfigurationError, Settings
 from attendee.logging import configure_logging
 from attendee.persistence.database import create_engine, create_session_factory
+from attendee.telegram.attendance import AttendanceHandlers
 from attendee.telegram.bootstrap import BotHandler, bot_handlers, build_application
 from attendee.telegram.onboarding import OnboardingHandlers
 from attendee.telegram.uploads import UploadHandlers
@@ -33,7 +35,9 @@ async def load_organization(
 
 
 def create_handlers(
-    session_factory: async_sessionmaker[AsyncSession], organization_id: int
+    session_factory: async_sessionmaker[AsyncSession],
+    organization_id: int,
+    timezone: str = "Asia/Singapore",
 ) -> list[BotHandler]:
     matching = AccountMatchingService(session_factory)
     return bot_handlers(
@@ -44,6 +48,13 @@ def create_handlers(
             AuthorizationService(session_factory),
             ImportService(session_factory),
             matching,
+        ),
+        AttendanceHandlers(
+            organization_id,
+            IdentityService(session_factory),
+            AuthorizationService(session_factory),
+            AttendanceService(session_factory),
+            timezone,
         ),
     )
 
@@ -58,7 +69,7 @@ def run(settings: Settings) -> None:
         try:
             organization = runner.run(load_organization(session_factory, slug))
             application = build_application(
-                token, create_handlers(session_factory, organization.id)
+                token, create_handlers(session_factory, organization.id, settings.app_timezone)
             )
             logging.getLogger(__name__).info("Database ready; serving organization %s", slug)
             application.run_polling(close_loop=False, bootstrap_retries=0)

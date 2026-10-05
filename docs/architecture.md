@@ -1,6 +1,6 @@
 # Architecture
 
-Status: runnable bot with organization identity, namelist import, and Telegram onboarding. Attendance features do not exist yet.
+Status: runnable bot with identity, namelist import, onboarding, attendance series, and Draft sessions with fixed rosters.
 
 `docs/prd.md` defines the product. `docs/decisions.md` records the accepted stack. `AGENTS.md` defines coding rules.
 
@@ -27,7 +27,7 @@ It reads the organization that `BOT_ORGANIZATION` names (T33). This read also ch
 It constructs the application services and the Telegram handlers explicitly, then starts long polling.
 It disposes the engine after shutdown or startup failure.
 
-Future multi-step interactions use `ConversationHandler`. Telegram processes updates sequentially to preserve conversation state.
+Attendance creation uses an in-memory `ConversationHandler`. Telegram processes updates sequentially to preserve conversation state.
 Future handlers must keep transactions short. Spreadsheet work must not block the event loop.
 Incomplete conversations can reset after restart. Committed attendance data must survive restart.
 
@@ -93,6 +93,7 @@ The bot handles private chats only. Each handler translates between Telegram and
 | `OnboardingHandlers.start` | `/start` | `AccountMatchingService.match` |
 | `OnboardingHandlers.answer` | `m:y:<org>:<person>`, `m:n:<org>:<person>` | `confirm` or `reject` |
 | `UploadHandlers.document` | A document | `IdentityService`, `AuthorizationService.require_role`, `parse_file`, `ImportService.preview` |
+| `AttendanceHandlers` | Private `/attendance`, `/cancel`, and `a:` callbacks | `AttendanceService`, identity, and authorization |
 | `UploadHandlers.button` | `i:a:<token>`, `i:c:<token>` | `AuthorizationService.require_role`, `ImportService.apply` |
 
 - A member sees the candidate name only. The bot never shows another member's handle, Telegram ID, or an unresolved reason.
@@ -101,9 +102,71 @@ The bot handles private chats only. Each handler translates between Telegram and
 - The bot splits a long preview into messages of at most 4,096 characters. Only the last message carries the buttons.
 - `reporting/imports.py` formats the preview text for the bot and for `attendee-import`.
 
+## Attendance series and Draft sessions (implemented)
+
+`domain/attendance.py` defines name normalization, explicit date input, and status display.
+`application/attendance.py` supplies the attendance service and its Pydantic data transfer objects.
+`repositories/attendance.py` scopes every query to an organization.
+`telegram/attendance.py` holds conversation state and renders private admin prompts.
+
+The service exposes `list_series`, `create_series`, `preview_session`, `create_session`, and `get_session`.
+Each operation requires an organization admin through `AuthorizationService.require_role`.
+The authorization method accepts an optional database session. This permits a permission check inside the same write transaction.
+Existing authorization callers retain their behavior.
+
+| Table | Purpose and constraints |
+| --- | --- |
+| `attendance_series` | Organization, name, normalized name, creator, creation time; organization/name uniqueness |
+| `attendance_sessions` | Organization, series, date, optional label, UTC deadline, status, creator, creation time, creation key, request fingerprint |
+| `session_roster_entries` | Organization, session, person; a composite primary key prevents duplicate entries |
+
+Composite foreign keys prevent cross-organization series, session, creator, and roster links.
+Roster and creator references use the existing organization/person membership key.
+Foreign keys restrict deletion of referenced records. No membership deletion interface exists.
+The snapshot fixes required identities. It does not copy names, handles, or roles.
+
+The bot requests a series, date, optional label, and soft deadline before it shows a confirmation summary.
+An absent label uses the date for display.
+It lists series in pages of ten. It retains unfinished input in memory only.
+A new series remains unsaved until final confirmation. Cancellation creates nothing.
+
+`preview_session` reads current membership identities.
+`create_session` uses `write_session()` to check authorization and compare the current identities with the preview.
+A change requires fresh confirmation, even when the roster count stays equal.
+The transaction creates any new series, the Draft session, and all roster entries together.
+Every current membership participates, including admins and unlinked members. Later changes do not alter the saved snapshot.
+
+Each conversation has a random creation key. The session stores that key and a SHA-256 request fingerprint.
+The fingerprint identifies the confirmed input without a separate unfinished-draft table.
+An identical retry returns the saved session. Reuse with another creator or different input raises `CreationConflict`.
+A unique organization/creation-key constraint prevents duplicate sessions.
+
+Each button uses `a:<token>:<action>[:<id>]`.
+Actions select a series (`s`), select a page (`p`), create a series (`n`), skip a label (`l`), confirm (`y`), or cancel (`c`).
+The handler binds the token to the organization, user, chat, message, and current step.
+It consumes the token before database work. Each new prompt replaces the token.
+Malformed, stale, foreign, and repeated callbacks have no extra effect.
+An expired-callback handler answers old buttons after a restart or conversation end.
+
+The conversation uses `per_user=True`, `per_chat=True`, and `per_message=False` because it accepts both text and buttons.
+The library emits an advisory for this mixed conversation. Explicit message and token checks protect stale buttons.
+Updates remain sequential. Existing `/start` and upload handlers remain available during the conversation.
+
+Stored status values are `draft`, `open`, and `closed`. This phase creates only `draft`.
+The service derives `Deadline Passed` when an Open session has a deadline earlier than the read time.
+Draft and Closed sessions retain their display status. Reads never write a status change.
+Tests use Open fixtures. This phase adds no publication or status transition operation.
+
+[ACE LOGIC]
+Every attendance series belongs to an organization.
+Every attendance session belongs to an attendance series.
+Every attendance session has a roster snapshot.
+If an administrator changes a membership then every existing roster snapshot remains unchanged.
+If an open session passes a deadline then the session remains open.
+
 ## Future organization model
 
-These are design constraints, not implemented models.
+These constraints describe deferred extensions to the current models.
 
 - An `Organization` also owns chats, series, and custom field definitions.
 - An organization can have several Telegram chats.
@@ -139,7 +202,7 @@ A passed deadline leaves the poll open. A non-responder remains `No Response`, i
 An admin closes the poll manually after confirmation. Members can change responses while the poll is open.
 Only admins can change records after closure.
 
-Future application operations evaluate the deadline from UTC timestamps when they read session state.
+Application operations evaluate the deadline from UTC timestamps when they read session state.
 `Deadline Passed` does not require a dedicated scheduler or an automatic closure task.
 PRD §35 remains the capacity target: 500 registered members and 250 required respondents per poll.
 
@@ -152,7 +215,9 @@ Application operations use short transactions and separate sessions. Do not shar
 
 Alembic owns schema changes. Its async environment imports the project metadata and shares the engine configuration.
 `alembic/env.py` imports `attendee.persistence.models` before it reads the metadata.
-Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revision `0003_candidate_rejected` adds the `candidate_rejected` reason. Revisions use plain SQLAlchemy types.
+Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revision `0003_candidate_rejected` adds the `candidate_rejected` reason.
+Revision `0004_attendance` adds the three attendance tables without seed data. Its downgrade drops only those tables and their data.
+Revisions use plain SQLAlchemy types.
 `write_session()` starts a transaction with `BEGIN IMMEDIATE`. Use it for an operation that reads and then writes.
 SQLite stores timestamps as naive UTC. The `UTCDateTime` column type rejects naive input and returns aware UTC values.
 Review generated revisions before deployment. Never use runtime `create_all()`.

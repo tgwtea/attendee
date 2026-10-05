@@ -49,7 +49,7 @@ async def test_foreign_keys_enforced(tmp_path):
         await engine.dispose()
 
 
-def test_metadata_has_only_identity_tables():
+def test_metadata_has_identity_and_attendance_tables():
     from attendee.persistence import models  # noqa: F401
 
     assert set(Base.metadata.tables) == {
@@ -57,6 +57,9 @@ def test_metadata_has_only_identity_tables():
         "people",
         "memberships",
         "unresolved_matches",
+        "attendance_series",
+        "attendance_sessions",
+        "session_roster_entries",
     }
 
 

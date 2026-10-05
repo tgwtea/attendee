@@ -53,3 +53,21 @@ async def session_factory(migrated_settings):
         yield create_session_factory(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+async def attendance_club(session_factory):
+    from attendee.application.attendance import AttendanceService
+    from attendee.application.identity import IdentityService
+    from attendee.application.memberships import MembershipService
+    from attendee.application.organizations import OrganizationService
+    from attendee.domain.identity import MembershipRole
+
+    org = await OrganizationService(session_factory).create_organization("club", "Club")
+    identity = IdentityService(session_factory)
+    memberships = MembershipService(session_factory)
+    admin = await identity.create_person("Admin", 1001)
+    member = await identity.create_person("Member")
+    await memberships.add_membership(org.id, admin.id, MembershipRole.ADMIN)
+    await memberships.add_membership(org.id, member.id, MembershipRole.MEMBER)
+    return org, admin, member, AttendanceService(session_factory)

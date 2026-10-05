@@ -13,11 +13,17 @@ class AuthorizationService:
         self.session_factory = session_factory
 
     async def require_role(
-        self, organization_id: int, person_id: int, required: MembershipRole
+        self,
+        organization_id: int,
+        person_id: int,
+        required: MembershipRole,
+        session: AsyncSession | None = None,
     ) -> MembershipDTO:
         """Return the membership, or raise AccessDenied. No membership grants no access."""
-        async with self.session_factory() as session:
-            membership = await MembershipRepository(session).get(organization_id, person_id)
-            if membership is None or not role_satisfies(membership.role, required):
-                raise AccessDenied(f"Organization {organization_id} requires {required}")
-            return MembershipDTO.model_validate(membership)
+        if session is None:
+            async with self.session_factory() as owned:
+                return await self.require_role(organization_id, person_id, required, owned)
+        membership = await MembershipRepository(session).get(organization_id, person_id)
+        if membership is None or not role_satisfies(membership.role, required):
+            raise AccessDenied(f"Organization {organization_id} requires {required}")
+        return MembershipDTO.model_validate(membership)

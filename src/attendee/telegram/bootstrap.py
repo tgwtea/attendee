@@ -16,20 +16,26 @@ from telegram.ext import (
 )
 
 from attendee.telegram import onboarding, uploads
+from attendee.telegram.attendance import CALLBACK_PATTERN, AttendanceHandlers
 
-# These dictionaries match the library defaults; the bot keeps no state in them.
+# These dictionaries match the library defaults. Attendance state lives in its handlers.
 type BotApplication = Application[
     ExtBot[None], ContextTypes.DEFAULT_TYPE, dict[Any, Any], dict[Any, Any], dict[Any, Any], None
 ]
-type BotHandler = BaseHandler[Update, ContextTypes.DEFAULT_TYPE, None]
+# Conversation callbacks return state integers; other callbacks return None.
+type BotHandler = BaseHandler[Update, ContextTypes.DEFAULT_TYPE, Any]
 
 
 def bot_handlers(
-    members: onboarding.OnboardingHandlers, admins: uploads.UploadHandlers
+    members: onboarding.OnboardingHandlers,
+    admins: uploads.UploadHandlers,
+    attendance: AttendanceHandlers,
 ) -> list[BotHandler]:
     """Private chat handlers only. The bot ignores these updates in a group."""
     private = filters.ChatType.PRIVATE
     return [
+        attendance.conversation(),
+        CallbackQueryHandler(attendance.expired, pattern=CALLBACK_PATTERN),
         CommandHandler("start", members.start, filters=private),
         CallbackQueryHandler(members.answer, pattern=onboarding.CALLBACK_PATTERN),
         MessageHandler(filters.Document.ALL & private, admins.document),

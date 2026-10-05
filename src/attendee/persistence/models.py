@@ -1,8 +1,17 @@
-"""ORM records for organizations, global people, memberships, and unresolved matches."""
+"""ORM records for organization identity, unresolved matches, and attendance."""
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Date,
+    Enum,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from attendee.domain.identity import MembershipRole
@@ -110,3 +119,76 @@ class UnresolvedMatch(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class AttendanceSeries(Base):
+    __tablename__ = "attendance_series"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id", name="uq_attendance_series_org_id"),
+        UniqueConstraint("organization_id", "normalized_name", name="uq_attendance_series_name"),
+        CheckConstraint("length(name) BETWEEN 1 AND 200", name="valid_name"),
+        CheckConstraint("normalized_name <> ''", name="normalized_name_not_empty"),
+        ForeignKeyConstraint(
+            ["organization_id", "created_by"],
+            ["memberships.organization_id", "memberships.person_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT")
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    normalized_name: Mapped[str] = mapped_column(String(600))
+    created_by: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+
+
+class AttendanceSession(Base):
+    __tablename__ = "attendance_sessions"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id", name="uq_attendance_sessions_org_id"),
+        UniqueConstraint("organization_id", "creation_key", name="uq_attendance_sessions_creation"),
+        CheckConstraint("status IN ('draft', 'open', 'closed')", name="valid_status"),
+        CheckConstraint("label IS NULL OR length(label) BETWEEN 1 AND 200", name="valid_label"),
+        ForeignKeyConstraint(
+            ["organization_id", "series_id"],
+            ["attendance_series.organization_id", "attendance_series.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "created_by"],
+            ["memberships.organization_id", "memberships.person_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int]
+    series_id: Mapped[int] = mapped_column(index=True)
+    session_date: Mapped[date] = mapped_column(Date())
+    label: Mapped[str | None] = mapped_column(String(200))
+    deadline: Mapped[datetime] = mapped_column(UTCDateTime())
+    status: Mapped[str] = mapped_column(String(10), default="draft")
+    created_by: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    creation_key: Mapped[str] = mapped_column(String(64))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class SessionRosterEntry(Base):
+    __tablename__ = "session_roster_entries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["organization_id", "session_id"],
+            ["attendance_sessions.organization_id", "attendance_sessions.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "person_id"],
+            ["memberships.organization_id", "memberships.person_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    organization_id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(primary_key=True)
+    person_id: Mapped[int] = mapped_column(primary_key=True)

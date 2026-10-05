@@ -1,32 +1,55 @@
 """Fake Telegram updates for handler tests. No test uses a live Telegram account."""
 
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+
+_message_ids = count(1)
 
 
 def user(telegram_user_id, username):
     return SimpleNamespace(id=telegram_user_id, username=username)
 
 
-def message_update(telegram_user_id, username, document=None):
-    message = SimpleNamespace(reply_text=AsyncMock(), document=document)
+def message_update(
+    telegram_user_id, username, document=None, *, text=None, chat_id=None, chat_type="private"
+):
+    chat = SimpleNamespace(id=telegram_user_id if chat_id is None else chat_id, type=chat_type)
+    message = SimpleNamespace(
+        reply_text=AsyncMock(return_value=SimpleNamespace(message_id=next(_message_ids))),
+        document=document,
+        text=text,
+        chat=chat,
+        message_id=next(_message_ids),
+    )
     return SimpleNamespace(
+        effective_chat=chat,
         effective_message=message,
         effective_user=user(telegram_user_id, username),
         callback_query=None,
     )
 
 
-def callback_update(telegram_user_id, username, data):
+def callback_update(
+    telegram_user_id, username, data, *, message_id=None, chat_id=None, chat_type="private"
+):
+    update = message_update(telegram_user_id, username, chat_id=chat_id, chat_type=chat_type)
+    message = update.effective_message
+    if message_id is not None:
+        message.message_id = message_id
     query = SimpleNamespace(
         data=data,
+        message=message,
         from_user=user(telegram_user_id, username),
         answer=AsyncMock(),
         edit_message_text=AsyncMock(),
         edit_message_reply_markup=AsyncMock(),
     )
     return SimpleNamespace(
-        effective_message=None, effective_user=query.from_user, callback_query=query
+        effective_message=message,
+        effective_chat=update.effective_chat,
+        effective_user=query.from_user,
+        callback_query=query,
     )
 
 

@@ -7,14 +7,15 @@ Attendee is a Telegram attendance bot foundation. SMU Samba Masala is the initia
 The bot supports configuration, logging, SQLite connections, migrations, local backups, and organization identity.
 The schema holds organizations, people, and organization memberships with `member` and `admin` roles.
 In a private chat, `/start` links a member's Telegram account, and an admin can upload a namelist.
-Attendance features do not exist yet.
+Admins can create attendance series and Draft sessions through `/attendance`.
+Each session keeps a fixed roster snapshot. Publication and responses remain deferred.
 
 ## Stack
 
 | Area | Choice |
 | --- | --- |
 | Runtime | Python 3.13, `uv`, `src/` layout |
-| Telegram | `python-telegram-bot`, long polling; future `ConversationHandler` |
+| Telegram | `python-telegram-bot`, long polling; in-memory `ConversationHandler` |
 | Validation | Pydantic v2, `pydantic-settings` |
 | Database | SQLite, async SQLAlchemy, `aiosqlite`, Alembic |
 | Import/export | Standard `csv`, `openpyxl`; no pandas |
@@ -85,6 +86,10 @@ uv run alembic history
 
 Revision `0001_identity` adds the `organizations`, `people`, and `memberships` tables.
 Revision `0002_import_matching` adds `unresolved_matches` and the `people.telegram_handle` index. It converts stored handles to lowercase without `@`. It sets a handle that Telegram would reject to `NULL`.
+Revision `0004_attendance` adds `attendance_series`, `attendance_sessions`, and `session_roster_entries`.
+It preserves existing identity and import data. It seeds no attendance data.
+Its downgrade drops these three tables and all attendance data.
+
 Revision `0003_candidate_rejected` adds the `candidate_rejected` unresolved reason. It copies the `unresolved_matches` table and keeps every row. Its downgrade changes those rows to `no_match`.
 An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
 `uv run alembic downgrade base` drops every table and its data.
@@ -152,6 +157,41 @@ A member sends `/start` to the bot in a private chat.
 - A linked Telegram account gets a confirmation only.
 - If the Telegram handle matches one namelist entry, the bot asks "Are you <name>?". Yes links the account. No links nothing.
 - In every other case, the bot asks the member to contact an admin. The bot records an unresolved match for the admin.
+
+## Create a Draft attendance session
+
+An admin of `BOT_ORGANIZATION` uses `/attendance` in a private chat.
+
+1. Select an existing series, or press **Create new series**.
+2. Enter the session date: `2026-10-13` or `13 Oct 2026`.
+3. Enter an optional label, or press **Skip**.
+4. Enter the soft deadline: `2026-10-12 20:00` or `12 Oct 2026, 8:00 PM`.
+5. Check the summary and its timezone.
+6. Press **Confirm** to save the Draft session.
+
+Existing series appear on pages of ten buttons. A series name or label has at most 200 characters.
+Series names ignore case and repeated whitespace. Punctuation remains significant: `Patron's Day` and `Patrons Day` remain different names.
+Select an existing series to avoid an accidental duplicate.
+
+Dates require a year. Deadlines require a date and time.
+The bot uses `APP_TIMEZONE`, which defaults to `Asia/Singapore`.
+A deadline can use either date format with `HH:MM` or `8:00 PM`. A comma before the time is optional.
+The bot rejects relative dates and local times that are ambiguous or do not exist during a daylight-saving transition.
+A past deadline never closes or opens a session. Draft sessions stay Draft.
+
+Every current organization membership enters the snapshot, including admins and members without a linked Telegram account.
+If the roster changes before confirmation, the bot requires confirmation of a new summary.
+Later membership changes never alter a saved snapshot.
+
+The bot saves a new series, session, and snapshot in one transaction after confirmation.
+`/cancel` creates nothing. Another `/attendance` replaces the unfinished conversation.
+A restart cancels unfinished conversations. Saved Draft sessions survive a restart.
+Old buttons expire. A repeated confirmation creates no duplicate session.
+
+This phase posts nothing to a group. It adds no response buttons, reminders, closure, calculations, or exports.
+The next phase should add `/register`, publication, and responses together.
+One bot serves one organization. Future registration will support several group chats or channels.
+Admin resolution of unresolved identity matches remains necessary before a real rollout.
 
 ## Docker Compose
 

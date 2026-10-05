@@ -27,13 +27,14 @@ The PRD sets these decisions. Change them only through a PRD change.
 
 ## Accepted technical decisions
 
-All entries below have status **Accepted**, dated **2026-10-04**.
+All entries below have status **Accepted**.
+T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**.
 The finalized MVP stack supplies these choices. Product behavior remains subject to the PRD.
 
 | ID | Choice | Reason and consequence |
 | --- | --- | --- |
 | T1 | Python 3.13, `uv`, `pyproject.toml`, `src/attendee` | Generic package name; locked dependencies; one supported Python minor version. |
-| T2 | `python-telegram-bot`, long polling, future `ConversationHandler` | Telegram is the only MVP interface. Conversations can reset after restart. Updates remain sequential. |
+| T2 | `python-telegram-bot`, long polling, in-memory `ConversationHandler` | Telegram is the only MVP interface. Conversations can reset after restart. Updates remain sequential. |
 | T3 | SQLite, async SQLAlchemy ORM, `aiosqlite`, Alembic | Simple persistent storage. WAL, foreign keys, short transactions, and a busy timeout protect normal operation. |
 | T4 | Docker Compose on a provider-independent Linux VM | One non-root bot service and one persistent data volume. No Vercel or serverless deployment. |
 | T5 | Standard `csv` and `openpyxl` | CSV/XLSX import and XLSX export need no pandas. All spreadsheet files are temporary. |
@@ -70,6 +71,19 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T36 | Telegram upload limits | The bot accepts a private-chat document named `.csv` or `.xlsx`, at most 5 MB. It checks the declared size before download. It downloads into memory, parses in a worker thread, and never writes the file to disk. Only an admin of the configured organization can upload. |
 | T37 | In-memory import preview | The bot keeps one pending preview per admin in memory, keyed by a random token in `i:a:<token>` (Apply) or `i:c:<token>` (Cancel). A new upload replaces the old preview. Apply or Cancel removes the preview before any database work. A restart, a repeated button, or an unknown token answers "This preview expired. Upload the file again." Apply checks the admin role again. A preview with a rejected row has no Apply button. |
 
+| T38 | This phase ends with Draft sessions | Publication in PRD §11 remains deferred. The next phase adds publication and responses together. No group message appears in this phase. |
+| T39 | Every current organization membership enters the snapshot | Include admins and unlinked members. Member groups and narrower rosters remain deferred. The snapshot fixes membership identities, not profile values. |
+| T40 | Series buttons and normalized-name uniqueness | Show existing series in pages of ten. Normalize names with whitespace collapse and Unicode casefold. Keep punctuation significant. `Patron's Day` and `Patrons Day` remain distinct. Buttons reduce accidental duplicates. Names and labels permit 1–200 characters. |
+| T41 | Required date and optional label | Each session stores a calendar date separate from its label. An absent label uses the date for display. Accept `YYYY-MM-DD` and English `12 Oct 2026`. |
+| T42 | Explicit deadline formats in APP_TIMEZONE | Accept either date format followed by `HH:MM` or `8:00 PM`, with an optional comma. Show the timezone and UTC offset before confirmation. Reject relative dates, incomplete dates, and ambiguous or nonexistent local times. Past dates and deadlines remain valid. The user permits extra libraries, but these formats need none. T17 remains applicable. |
+| T43 | Defer chat registration | The next phase adds `/register`. One bot serves one organization and supports several group chats or channels. T11 retains series defaults and session overrides. No chat table or registration command exists in this phase. |
+| T44 | In-memory attendance conversation | Use `ConversationHandler` with sequential updates and user/chat scope. Keep one unfinished conversation per admin chat. A restart or new `/attendance` cancels unfinished input. No separate unfinished-draft table exists. Committed Draft sessions persist. |
+| T45 | Bound, single-use callbacks | Use `a:<token>:<action>[:<id>]`, within 64 bytes. Bind the token to organization, admin, chat, message, and step. Replace tokens after each accepted step. Consume confirmation before database work. Invalid or expired buttons have no extra effect. |
+| T46 | Persistent creation key | Store a unique organization/creation key and request fingerprint on the session. An identical retry returns the same session. Another creator or different confirmed input raises `CreationConflict`. Check authorization again on retries. |
+| T47 | Confirm roster changes again | Compare current membership identities with the preview inside `BEGIN IMMEDIATE`. A difference creates nothing. Show a fresh summary and require confirmation again, even if the count stays equal. |
+| T48 | Atomic final creation | Save a new series, session, and snapshot in one transaction after final confirmation. Cancellation creates nothing. Duplicate series names return the admin to series selection. Database constraints prevent cross-organization links and duplicate roster entries. Restrict deletion of referenced memberships. Revision `0004_attendance` adds only the three attendance tables. |
+| T49 | Derived deadline status | Store `draft`, `open`, and `closed`. Derive `Deadline Passed` only when an Open session has a deadline earlier than the read time. A deadline never changes stored status. No status transition operation exists in this phase. |
+
 ## Foundation defaults
 
 - The SQLite busy timeout is 5,000 ms and is configurable.
@@ -84,9 +98,12 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 
 ## Open product questions for later phases
 
-These questions do not block the identity phase. Do not settle them through an implementation assumption.
+These questions do not block the current phase. Do not settle them through an implementation assumption.
 
-None.
+No unanswered choices remain for this phase.
+
+Before real rollout, add an admin operation to resolve an unmatched Telegram account.
+No resolution interface or admin management command exists in this phase.
 
 Resolved on 2026-10-05: organization context in a private chat (T33), confirmation storage (T34), the rejection reason (T35), upload limits (T36), and preview storage (T37).
 
