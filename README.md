@@ -92,6 +92,7 @@ It preserves existing identity and import data. It seeds no attendance data.
 Its downgrade drops these three tables and all attendance data.
 Revision `0005_organization_chats` adds `organization_chats`. Its downgrade drops that table and every registered group.
 Revision `0006_session_publications` adds `session_publications`. It alters no existing table. Its downgrade drops the attempt history; session status stays unchanged.
+Revision `0007_session_responses` adds `session_responses` and `session_response_events`. It alters no existing table. Its downgrade drops every response.
 
 Revision `0003_candidate_rejected` adds the `candidate_rejected` unresolved reason. It copies the `unresolved_matches` table and keeps every row. Its downgrade changes those rows to `no_match`.
 An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
@@ -210,7 +211,17 @@ A timeout leaves the result unknown. The bot then asks the admin to look at the 
 "I can't see the poll" marks the attempt failed, and a retry is allowed.
 At startup, the bot marks an attempt that a crash interrupted as unknown.
 
-The poll buttons do nothing yet. Responses come in the next step of this phase. Do not deploy this step alone.
+
+## Respond to a poll
+
+A member on the session roster taps a poll button in the group. The group never shows a response or a reason.
+
+- **Coming** saves at once. A pop-up that only the member sees confirms it.
+- **Not Coming**, **Late**, and **Leaving Early** open the private chat with the bot. The member sends a reason of at most 1000 characters. The bot saves the response only when the reason arrives.
+- A new tap replaces the previous one. A repeated tap changes nothing. The latest saved response is the current one.
+- A bot restart forgets a tap that waits for a reason. The member taps again.
+- A missed deadline does not block a response. A Draft or Closed session does.
+
 Admin resolution of unresolved identity matches remains necessary before a real rollout.
 
 ## Docker Compose
