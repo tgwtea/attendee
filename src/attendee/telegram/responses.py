@@ -3,17 +3,18 @@
 A tap that changes a saved status asks for a second tap first (decision T68).
 
 A response takes up to three updates: the tap, "/start reason", and the reason text.
-Only the pending tap links them. It lives in process memory, keyed by Telegram user ID
-(decision T64), so a restart loses it and the member taps again.
+The private prompt links the reason reply to its original pending tap (decision T78).
+The state lives in process memory, so a restart loses it and the member taps again.
 """
 
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy.exc import SQLAlchemyError
-from telegram import Message, Update
+from telegram import ForceReply, Message, Update
 from telegram.ext import ContextTypes, filters
 
 from attendee.application.responses import (
@@ -46,17 +47,22 @@ class ArmedChange:
     session_id: int
     status: ResponseStatus
     expires_at: float
+    callback_id: str
 
 
 class HasPendingReason(filters.MessageFilter):
-    """Match a message only from a user with a pending tap. Other text reaches /attendance."""
+    """Match a reply to a known reason prompt. Other text reaches /attendance."""
 
-    def __init__(self, pending: dict[int, PendingReason]) -> None:
+    def __init__(self, prompts: dict[tuple[int, int], PendingReason]) -> None:
         super().__init__(name="HasPendingReason")
-        self.pending = pending
+        self.prompts = prompts
 
     def filter(self, message: Message) -> bool:
-        return message.from_user is not None and message.from_user.id in self.pending
+        return (
+            message.from_user is not None
+            and message.reply_to_message is not None
+            and (message.from_user.id, message.reply_to_message.message_id) in self.prompts
+        )
 
 
 def _denied_text(exc: NotLinked | NotOnRoster | SessionNotOpen) -> str:
@@ -85,12 +91,19 @@ class ResponseHandlers:
         self.responses = responses
         self.clock = clock
         self.pending: dict[int, PendingReason] = {}
-        self.has_pending = HasPendingReason(self.pending)
+        self.prompts: dict[tuple[int, int], PendingReason] = {}
+        self.has_pending = HasPendingReason(self.prompts)
+        self.callbacks: OrderedDict[str, None] = OrderedDict()
         # Memory only, like `pending`. A restart forgets an armed change.
         self.armed: dict[int, ArmedChange] = {}
 
     def _needs_confirmation(
-        self, user_id: int, session_id: int, status: ResponseStatus, current: ResponseStatus | None
+        self,
+        user_id: int,
+        session_id: int,
+        status: ResponseStatus,
+        current: ResponseStatus | None,
+        callback_id: str,
     ) -> bool:
         """Arm on the first tap that changes a saved status. A second tap in time disarms."""
         armed = self.armed.pop(user_id, None)
@@ -101,10 +114,11 @@ class ResponseHandlers:
             armed is not None
             and armed.session_id == session_id
             and armed.status is status
+            and armed.callback_id != callback_id
             and now < armed.expires_at
         ):
             return False
-        self.armed[user_id] = ArmedChange(session_id, status, now + CONFIRM_SECONDS)
+        self.armed[user_id] = ArmedChange(session_id, status, now + CONFIRM_SECONDS, callback_id)
         return True
 
     async def tap(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,6 +126,12 @@ class ResponseHandlers:
         query = update.callback_query
         if query is None:
             return
+        if query.id in self.callbacks:
+            await query.answer(messages.VOTE_REPEAT, show_alert=True)
+            return
+        self.callbacks[query.id] = None
+        if len(self.callbacks) > 4096:
+            self.callbacks.popitem(last=False)
         vote = parse_vote(query.data)
         if vote is None:
             await query.answer(messages.VOTE_INVALID, show_alert=True)
@@ -120,7 +140,9 @@ class ResponseHandlers:
         user_id = query.from_user.id
         try:
             target = await self.responses.check(self.organization_id, user_id, session_id)
-            if self._needs_confirmation(user_id, session_id, status, target.current_status):
+            if self._needs_confirmation(
+                user_id, session_id, status, target.current_status, query.id
+            ):
                 assert target.current_status is not None
                 await query.answer(
                     messages.CONFIRM_REPLACE.format(
@@ -133,8 +155,9 @@ class ResponseHandlers:
                 return
             if status is ResponseStatus.COMING:
                 # A Coming tap replaces any pending non-Coming tap.
-                self.pending.pop(user_id, None)
                 await self.responses.record(self.organization_id, user_id, session_id, status)
+                self.pending.pop(user_id, None)
+                self._clear_prompts(user_id)
                 await query.answer(messages.RECORDED.format(status=status.label), show_alert=True)
                 return
         except (NotLinked, NotOnRoster, SessionNotOpen) as exc:
@@ -167,10 +190,13 @@ class ResponseHandlers:
             logging.getLogger(__name__).error("Response database operation failed")
             await message.reply_text(messages.TAP_NOT_SAVED)
             return
-        await message.reply_text(
+        await self._prompt(
+            message,
+            user.id,
+            pending,
             messages.REASON_PROMPT.format(
                 status=pending.status.label, session=_session_name(target)
-            )
+            ),
         )
 
     async def reason(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,7 +204,9 @@ class ResponseHandlers:
         message, user = update.effective_message, update.effective_user
         if message is None or user is None:
             return
-        pending = self.pending.get(user.id)
+        if message.reply_to_message is None:
+            return
+        pending = self.prompts.get((user.id, message.reply_to_message.message_id))
         if pending is None:
             return
         try:
@@ -186,10 +214,10 @@ class ResponseHandlers:
                 self.organization_id, user.id, pending.session_id, pending.status, message.text
             )
         except ReasonMissing:
-            await message.reply_text(messages.REASON_MISSING)
+            await self._prompt(message, user.id, pending, messages.REASON_MISSING)
             return
         except ReasonTooLong:
-            await message.reply_text(messages.REASON_TOO_LONG)
+            await self._prompt(message, user.id, pending, messages.REASON_TOO_LONG)
             return
         except (NotLinked, NotOnRoster, SessionNotOpen) as exc:
             self._drop(user.id, pending)
@@ -198,14 +226,28 @@ class ResponseHandlers:
         except SQLAlchemyError:
             # Keep the pending tap. PRD §36: confirm only after the save.
             logging.getLogger(__name__).error("Response database operation failed")
-            await message.reply_text(messages.REASON_NOT_SAVED)
+            await self._prompt(message, user.id, pending, messages.REASON_NOT_SAVED)
             return
         self._drop(user.id, pending)
         await message.reply_text(
             messages.RECORDED_REASON.format(status=result.status.label, reason=result.reason)
         )
 
+    async def _prompt(
+        self, message: Message, user_id: int, pending: PendingReason, text: str
+    ) -> None:
+        prompt = await message.reply_text(text, reply_markup=ForceReply(selective=True))
+        self.prompts[user_id, prompt.message_id] = pending
+
+    def _clear_prompts(self, user_id: int) -> None:
+        for key in list(self.prompts):
+            if key[0] == user_id:
+                del self.prompts[key]
+
     def _drop(self, user_id: int, pending: PendingReason) -> None:
         """Remove this pending tap only. A newer tap stays."""
+        for key, target in list(self.prompts.items()):
+            if key[0] == user_id and target is pending:
+                del self.prompts[key]
         if self.pending.get(user_id) is pending:
             del self.pending[user_id]

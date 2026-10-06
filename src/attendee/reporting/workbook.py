@@ -9,6 +9,7 @@ import io
 import re
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -29,7 +30,7 @@ def filename(series_name: str) -> str:
 
 def _text(sheet: Worksheet, row: int, column: int, value: str) -> None:
     """Write a string as text. openpyxl stores a string that starts with '=' as a formula."""
-    target = sheet.cell(row=row, column=column, value=value)
+    target = sheet.cell(row=row, column=column, value=ILLEGAL_CHARACTERS_RE.sub("", value))
     target.data_type = "s"
 
 
@@ -56,7 +57,10 @@ def build_workbook(report: SeriesReport) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     assert sheet is not None
-    sheet.title = _SHEET_FORBIDDEN.sub("-", report.series_name)[:31] or "Attendance"
+    sheet.title = (
+        _SHEET_FORBIDDEN.sub("-", ILLEGAL_CHARACTERS_RE.sub("", report.series_name))[:31]
+        or "Attendance"
+    )
     for column, heading in enumerate(FIXED_HEADINGS, start=1):
         sheet.cell(row=1, column=column, value=heading)
     for offset, column in enumerate(report.columns):

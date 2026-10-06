@@ -227,9 +227,11 @@ Updates stay sequential (`concurrent_updates(False)`), so a send blocks other up
 
 1. A Coming tap calls `record()`. The bot answers with a pop-up that only the member sees.
 2. Another tap calls `check()` and writes nothing. The bot keeps the pending tap in memory and opens `t.me/<bot>?start=reason`.
-3. `/start reason` asks for the reason. The next private text calls `record()`. The bot confirms after commit.
+3. `/start reason` sends a private `ForceReply` prompt. A reply to that prompt calls `record()`. The bot confirms after commit.
 
-The reason handler is first in the handler list. Its filter matches only users with a pending tap, so other private text still reaches `/attendance`.
+The reason handler is first in the handler list. Its filter matches a reply to a known private reason prompt.
+Other private text still reaches `/attendance`. Each prompt keeps its original session and status after a new tap.
+The bot ignores recent callback retries. A response change requires a distinct callback ID.
 
 [ACE LOGIC]
 If a request inserts a publishing attempt for a session then the request sends the poll.

@@ -210,3 +210,24 @@ async def test_workbook_writes_formula_like_names_as_text(series, service, sessi
     assert sheet is not None
     assert sheet["B2"].data_type == "s"
     assert sheet["B2"].value == '=HYPERLINK("http://x","y")'
+
+
+async def test_export_removes_xml_control_characters(series, service):
+    org, admin, first, *_ = series
+    report = await service.series_report(org.id, admin.id, first.series_id, NOW)
+    row = report.rows[0].model_copy(update={"name": "=Name\x0bSurname\x00"})
+    column = report.columns[0].model_copy(update={"label": "Week\x01One"})
+    report = report.model_copy(
+        update={
+            "series_name": "Practice\x0b",
+            "rows": (row,),
+            "columns": (column, *report.columns[1:]),
+        }
+    )
+    sheet = load_workbook(io.BytesIO(build_workbook(report))).active
+    assert sheet is not None
+    assert sheet.title == "Practice"
+    assert sheet["B2"].value == "=NameSurname"
+    assert sheet["B2"].data_type == "s"
+    assert sheet["F1"].value == "13 Oct (WeekOne)"
+    assert row.name == "=Name\x0bSurname\x00"

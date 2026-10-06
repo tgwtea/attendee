@@ -203,7 +203,10 @@ RECORDED_REASON = "Got it! You're marked as {status}.\nReason: {reason}"
 CONFIRM_REPLACE = (
     "You already said {current}. Tap {new} again within {seconds} seconds to change your answer."
 )
-REASON_PROMPT = "You picked {status} for {session}.\n\nWhat's the reason? Only admins will see it."
+REASON_PROMPT = (
+    "You picked {status} for {session}.\n\n"
+    "Reply to this message with the reason. Only admins will see it."
+)
 NO_PENDING_REASON = "There's nothing waiting for a reason. Tap a button on the group poll first."
 # PRD §34 "Reason missing".
 REASON_MISSING = "Please add a reason so I can save your answer."
@@ -253,3 +256,5 @@ STATS_NO_REASONS = "No reasons yet."
 # XLSX export. Open sessions sit after the totals and do not count yet (decision T73).
 STATS_OPEN_COLUMN = "{session} (Open)"
 STATS_EXPORT_CAPTION = "{series}. Columns marked (Open) don't count in the totals yet."
+
+VOTE_REPEAT = "This tap already reached the bot. Tap the button again to confirm a change."

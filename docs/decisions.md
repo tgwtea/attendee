@@ -111,3 +111,13 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T74 | Read-only `/stats` flow | `/stats` in a private chat lists series that have a non-Draft session, then that series's current sessions and Export Excel, then the PRD §19 counts with View No Response, View Responses, and View Reasons. The buttons use `st:<action>:<id>` and keep no state, because the flow only reads. Each tap checks the private chat and the admin role again. Archived sessions leave the list but stay in the export. |
 | T75 | Admin-only report texts | Only the "Attendance reports" section of `copy.py` shows other members' responses, reasons, and counts. Those texts go only to an admin in a private chat. Long lists split at 4096 characters, and the buttons stay on the last message. Send Reminder and Close Poll wait for their features. |
 | T76 | In-memory XLSX export | openpyxl builds the workbook in a worker thread into bytes, and the bot sends it with `reply_document` as `<series>.xlsx`. No file goes to disk (T16). Every name cell is written as text, so a name that starts with `=` never runs as a formula. An export failure logs only the error type. |
+
+### Response and export repairs (2026-10-06)
+
+- T77: The bot ignores the last 4096 callback IDs. A change confirmation requires a distinct callback ID.
+- T78: A private reason prompt uses `ForceReply`. The reply message identifies the prompt and its pending response.
+  A new tap changes the pending response for `/start reason`. It does not change an existing prompt target.
+  Unrelated text does not enter the reason handler. A restart removes all prompt state.
+  This decision updates T65 and T66. T64 still defines the latest pending tap.
+- T79: The XLSX export removes unsupported XML control characters from names, headings, and worksheet titles.
+  The database keeps the original text. The export still writes names as text to prevent formula execution.

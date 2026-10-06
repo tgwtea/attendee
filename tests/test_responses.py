@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
-from telegram import Chat, Message, MessageEntity, User
+from telegram import Chat, ForceReply, Message, MessageEntity, User
 from telegram import Update as TelegramUpdate
 from telegram_fakes import callback_update, message_update, replies
 from test_attendance import add_member, create
@@ -204,9 +204,10 @@ async def test_late_flow_from_tap_to_reason(handlers, open_session, session_fact
     start = message_update(MEMBER_TG, "sarah", text="/start reason")
     await handlers.start(start, bot_context())
     prompt = messages.REASON_PROMPT.format(status="Late", session="Patrons Day on 13 October 2026")
-    assert replies(start) == [(prompt, None)]
+    assert replies(start)[0][0] == prompt
+    assert isinstance(replies(start)[0][1], ForceReply)
     text = message_update(MEMBER_TG, "sarah", text="Class ends at 7:30pm.")
-    await handlers.reason(text, bot_context())
+    await reply_reason(handlers, text)
     recorded = messages.RECORDED_REASON.format(status="Late", reason="Class ends at 7:30pm.")
     assert replies(text) == [(recorded, None)]
     assert handlers.pending == {}
@@ -299,11 +300,13 @@ async def test_bad_reason_keeps_pending_tap(handlers, open_session, session_fact
     _, draft = open_session
     await handlers.tap(group_tap(draft.id, "n"), bot_context())
     blank = message_update(MEMBER_TG, "sarah", text="   ")
-    await handlers.reason(blank, bot_context())
+    await reply_reason(handlers, blank)
     long = message_update(MEMBER_TG, "sarah", text="x" * 1001)
-    await handlers.reason(long, bot_context())
-    assert replies(blank) == [(messages.REASON_MISSING, None)]
-    assert replies(long) == [(messages.REASON_TOO_LONG, None)]
+    await reply_reason(handlers, long)
+    assert replies(blank)[0][0] == messages.REASON_MISSING
+    assert isinstance(replies(blank)[0][1], ForceReply)
+    assert replies(long)[0][0] == messages.REASON_TOO_LONG
+    assert isinstance(replies(long)[0][1], ForceReply)
     assert MEMBER_TG in handlers.pending
     assert await current(session_factory) == []
 
@@ -326,19 +329,22 @@ async def test_database_failure_keeps_pending_tap(
     async def fail(*_args, **_kwargs):
         raise OperationalError("INSERT", {}, Exception("locked"))
 
+    await handlers.start(message_update(MEMBER_TG, "sarah", text="/start reason"), bot_context())
     monkeypatch.setattr(handlers.responses, "record", fail)
     text = message_update(MEMBER_TG, "sarah", text="Class")
-    await handlers.reason(text, bot_context())
-    assert replies(text) == [(messages.REASON_NOT_SAVED, None)]
+    await reply_reason(handlers, text)
+    assert replies(text)[0][0] == messages.REASON_NOT_SAVED
+    assert isinstance(replies(text)[0][1], ForceReply)
     assert MEMBER_TG in handlers.pending
 
 
 async def test_closed_between_tap_and_reason(handlers, open_session, session_factory):
     _, draft = open_session
     await handlers.tap(group_tap(draft.id, "l"), bot_context())
+    await handlers.start(message_update(MEMBER_TG, "sarah", text="/start reason"), bot_context())
     await set_status(session_factory, draft.id, SessionStatus.CLOSED)
     text = message_update(MEMBER_TG, "sarah", text="Class")
-    await handlers.reason(text, bot_context())
+    await reply_reason(handlers, text)
     assert replies(text) == [(messages.POLL_CLOSED, None)]
     assert handlers.pending == {}
     assert await current(session_factory) == []
@@ -359,7 +365,7 @@ async def test_tap_rejections_use_popups(handlers, open_session, session_factory
     assert handlers.pending == {}
 
 
-def private_text(text, user_id=MEMBER_TG):
+def private_text(text, user_id=MEMBER_TG, reply_to_message=None):
     entities = (
         [MessageEntity(MessageEntity.BOT_COMMAND, 0, len(text.split()[0]))]
         if text.startswith("/")
@@ -372,6 +378,7 @@ def private_text(text, user_id=MEMBER_TG):
         from_user=User(user_id, "Sarah", False),
         text=text,
         entities=entities,
+        reply_to_message=reply_to_message,
     )
     # CommandHandler reads the bot username to accept /start@attendee_bot.
     message.set_bot(SimpleNamespace(username="attendee_bot"))  # pyright: ignore[reportArgumentType]
@@ -392,10 +399,68 @@ def test_routing_sends_text_to_reason_only_with_pending_tap():
     # Without a pending tap, stray private text matches no handler.
     assert first_handler(application, private_text("Overseas")) is None
     responses.pending[MEMBER_TG] = PendingReason(1, ResponseStatus.LATE)
-    assert first_handler(application, private_text("Overseas")) is reason_handler
+    assert first_handler(application, private_text("Overseas")) is None
+    prompt = private_text("Please reply").message
+    responses.prompts[MEMBER_TG, prompt.message_id] = responses.pending[MEMBER_TG]
+    reply = private_text("Overseas", reply_to_message=prompt)
+    assert first_handler(application, reply) is reason_handler
     # Commands never count as a reason.
     assert first_handler(application, private_text("/attendance")) is not reason_handler
     start = first_handler(application, private_text("/start reason"))
     assert start.callback == responses.start
     plain = first_handler(application, private_text("/start"))
     assert plain.callback != responses.start
+
+
+async def reply_reason(handlers, update):
+    if not handlers.prompts:
+        await handlers.start(
+            message_update(MEMBER_TG, "sarah", text="/start reason"), bot_context()
+        )
+    prompt_id = [key[1] for key in handlers.prompts if key[0] == MEMBER_TG][-1]
+    update.effective_message.reply_to_message = SimpleNamespace(message_id=prompt_id)
+    await handlers.reason(update, bot_context())
+
+
+async def test_repeated_callback_does_not_confirm_change(handlers, open_session, session_factory):
+    org, draft = open_session
+    await ResponseService(session_factory).record(
+        org.id, MEMBER_TG, draft.id, ResponseStatus.LATE, "Bus"
+    )
+    first = group_tap(draft.id, "c")
+    await handlers.tap(first, bot_context())
+    await handlers.tap(first, bot_context())
+    assert await current(session_factory) == [("late", "Bus")]
+    assert len(await events(session_factory)) == 1
+    await handlers.tap(group_tap(draft.id, "c"), bot_context())
+    assert await current(session_factory) == [("coming", None)]
+    # A delayed repeat of the original callback also has no effect.
+    await handlers.tap(first, bot_context())
+    assert len(await events(session_factory)) == 2
+
+
+async def test_reason_reply_keeps_original_session(
+    handlers, open_session, attendance_club, session_factory
+):
+    org, first = open_session
+    second = await create(attendance_club, series_id=first.series_id, new_series_name=None)
+    await set_status(session_factory, second.id, SessionStatus.OPEN)
+    await handlers.tap(group_tap(first.id, "l"), bot_context())
+    await handlers.start(message_update(MEMBER_TG, "sarah", text="/start reason"), bot_context())
+    await handlers.tap(group_tap(second.id, "n"), bot_context())
+    await reply_reason(handlers, message_update(MEMBER_TG, "sarah", text="Class for first session"))
+    async with session_factory() as session:
+        saved = await session.scalars(select(SessionResponse))
+        assert [(row.session_id, row.reason) for row in saved] == [
+            (first.id, "Class for first session")
+        ]
+    assert handlers.pending[MEMBER_TG].session_id == second.id
+
+
+async def test_unrelated_text_does_not_save_reason(handlers, open_session, session_factory):
+    _, draft = open_session
+    await handlers.tap(group_tap(draft.id, "l"), bot_context())
+    await handlers.start(message_update(MEMBER_TG, "sarah", text="/start reason"), bot_context())
+    await handlers.reason(message_update(MEMBER_TG, "sarah", text="New series name"), bot_context())
+    assert await current(session_factory) == []
+    assert handlers.pending

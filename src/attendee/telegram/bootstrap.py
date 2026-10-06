@@ -45,7 +45,7 @@ def bot_handlers(
     """Private chat handlers, group registration and upgrades, and group poll buttons.
 
     Only the first matching handler runs. The reason handler comes before /attendance, but it
-    matches only a user with a pending tap, so other private text still reaches /attendance.
+    matches only a reply to a known prompt, so other private text still reaches /attendance.
     "/start reason" comes before the onboarding /start.
     """
     private = filters.ChatType.PRIVATE

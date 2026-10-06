@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 _message_ids = count(1)
+_callback_ids = count(1)
 
 
 def user(telegram_user_id, username):
@@ -17,6 +18,7 @@ def message_update(
     chat = SimpleNamespace(id=telegram_user_id if chat_id is None else chat_id, type=chat_type)
     message = SimpleNamespace(
         reply_text=AsyncMock(return_value=SimpleNamespace(message_id=next(_message_ids))),
+        reply_to_message=None,
         document=document,
         text=text,
         chat=chat,
@@ -38,6 +40,7 @@ def callback_update(
     if message_id is not None:
         message.message_id = message_id
     query = SimpleNamespace(
+        id=str(next(_callback_ids)),
         data=data,
         message=message,
         from_user=user(telegram_user_id, username),
