@@ -1,30 +1,42 @@
-"""Admin namelist upload in a private chat: document, preview, then Apply or Cancel.
+"""Admin namelist upload in a private chat: document, group, preview, then Apply or Cancel.
 
 The bot downloads the file into memory and never writes it to disk (decision T36).
 A preview waits in memory until Apply or Cancel; a restart cancels it (decision T37).
+An admin of several groups picks the group first; the parsed file waits in memory (T85).
 """
 
 import asyncio
 import secrets
 from dataclasses import dataclass
 from pathlib import PurePath
+from typing import Protocol
 
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from attendee.application.authorization import AuthorizationService
-from attendee.application.errors import AccessDenied, ImportConflict, ImportRejected
-from attendee.application.identity import IdentityService
+from attendee.application.errors import (
+    AccessDenied,
+    ApplicationError,
+    ImportConflict,
+    ImportRejected,
+)
+from attendee.application.groups import GroupAccess
 from attendee.application.import_files import MAX_FILE_BYTES, SUFFIXES, parse_file
 from attendee.application.imports import ImportPreview, ImportService
 from attendee.application.matching import AccountMatchingService
-from attendee.domain.identity import MembershipRole
-from attendee.domain.imports import ImportFileError
+from attendee.domain.imports import ImportFileError, ParsedFile
 from attendee.reporting.imports import format_preview
 from attendee.telegram import messages
 
-CALLBACK_PATTERN = r"^i:"
+CALLBACK_PATTERN = r"^i:[ac]:"
+GROUP_PATTERN = r"^i:g:"
+
+
+class ReplyText(Protocol):
+    async def __call__(
+        self, text: str, *, reply_markup: InlineKeyboardMarkup | None = None
+    ) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -34,11 +46,26 @@ class PendingImport:
 
 
 class PendingImports:
-    """One pending preview per admin, keyed by a random token. Memory only."""
+    """One pending preview and one pending group choice per admin, by random token. Memory only."""
 
     def __init__(self) -> None:
         self._by_token: dict[str, PendingImport] = {}
         self._token_by_admin: dict[int, str] = {}
+        self._files: dict[int, tuple[str, ParsedFile, frozenset[int]]] = {}
+
+    def put_file(self, admin_user_id: int, parsed: ParsedFile, group_ids: frozenset[int]) -> str:
+        """Keep a parsed file until the admin picks one of the offered groups."""
+        token = secrets.token_urlsafe(9)
+        self._files[admin_user_id] = (token, parsed, group_ids)
+        return token
+
+    def take_file(self, token: str, admin_user_id: int, group_id: int) -> ParsedFile | None:
+        """Remove and return the file for an offered group. A second call returns None."""
+        pending = self._files.get(admin_user_id)
+        if pending is None or pending[0] != token or group_id not in pending[2]:
+            return None
+        del self._files[admin_user_id]
+        return pending[1]
 
     def put(self, admin_user_id: int, preview: ImportPreview) -> str:
         """Store the preview. It replaces an earlier preview of the same admin."""
@@ -74,31 +101,36 @@ def parse_import_callback(data: str | None) -> tuple[bool, str] | None:
     return parts[1] == "a", parts[2]
 
 
+def group_callback(token: str, group_id: int) -> str:
+    return f"i:g:{token}:{group_id}"
+
+
+def parse_group_callback(data: str | None) -> tuple[str, int] | None:
+    parts = (data or "").split(":")
+    if len(parts) != 4 or parts[:2] != ["i", "g"] or not parts[2]:
+        return None
+    if not (parts[3].isascii() and parts[3].isdigit()):
+        return None
+    return parts[2], int(parts[3])
+
+
 class UploadHandlers:
     def __init__(
         self,
-        organization_id: int,
-        identity: IdentityService,
-        authorization: AuthorizationService,
+        access: GroupAccess,
         imports: ImportService,
         matching: AccountMatchingService,
         pending: PendingImports | None = None,
     ) -> None:
-        self.organization_id = organization_id
-        self.identity = identity
-        self.authorization = authorization
+        self.access = access
         self.imports = imports
         self.matching = matching
         self.pending = pending or PendingImports()
 
-    async def _is_admin(self, telegram_user_id: int) -> bool:
-        person = await self.identity.find_by_telegram_user_id(telegram_user_id)
-        if person is None:
-            return False
+    async def _is_admin(self, group_id: int, telegram_user_id: int) -> bool:
+        """Ask Telegram. AdminCheckFailed reaches the caller."""
         try:
-            await self.authorization.require_role(
-                self.organization_id, person.id, MembershipRole.ADMIN
-            )
+            await self.access.require_admin(group_id, telegram_user_id)
         except AccessDenied:
             return False
         return True
@@ -108,7 +140,12 @@ class UploadHandlers:
         user = update.effective_user
         if message is None or user is None or message.document is None:
             return
-        if not await self._is_admin(user.id):
+        try:
+            groups = await self.access.admin_groups(user.id)
+        except ApplicationError as exc:
+            await message.reply_text(str(exc))
+            return
+        if not groups:
             await message.reply_text(messages.UPLOAD_DENIED)
             return
         document = message.document
@@ -128,16 +165,35 @@ class UploadHandlers:
         except ImportFileError as exc:
             await message.reply_text(messages.UPLOAD_UNREADABLE.format(error=exc))
             return
-        preview = await self.imports.preview(self.organization_id, parsed)
-        unresolved = await self.matching.list_unresolved(self.organization_id)
+        if len(groups) > 1:
+            token = self.pending.put_file(user.id, parsed, frozenset(g.id for g in groups))
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            group.title, callback_data=group_callback(token, group.id)
+                        )
+                    ]
+                    for group in groups
+                ]
+            )
+            await message.reply_text(messages.SELECT_GROUP, reply_markup=keyboard)
+            return
+        await self._preview(message.reply_text, user.id, groups[0].id, parsed)
+
+    async def _preview(
+        self, reply: ReplyText, user_id: int, group_id: int, parsed: ParsedFile
+    ) -> None:
+        preview = await self.imports.preview(group_id, parsed)
+        unresolved = await self.matching.list_unresolved(group_id)
         unresolved_line = messages.PREVIEW_UNRESOLVED.format(count=len(unresolved))
         text = f"{format_preview(preview)}\n{unresolved_line}"
         if preview.rejected:
-            self.pending.discard(user.id)
+            self.pending.discard(user_id)
             text = f"{text}\n\n{messages.PREVIEW_REJECTED}"
             keyboard = None
         else:
-            token = self.pending.put(user.id, preview)
+            token = self.pending.put(user_id, preview)
             text = f"{text}\n\n{messages.PREVIEW_CONFIRM}"
             keyboard = InlineKeyboardMarkup(
                 [
@@ -153,8 +209,34 @@ class UploadHandlers:
             )
         chunks = messages.split_message(text)
         for chunk in chunks[:-1]:
-            await message.reply_text(chunk)
-        await message.reply_text(chunks[-1], reply_markup=keyboard)
+            await reply(chunk)
+        await reply(chunks[-1], reply_markup=keyboard)
+
+    async def pick_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """i:g:<token>:<group_id>. The group ID is a claim: the token and admin check decide."""
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        await _remove_buttons(query)
+        user = query.from_user
+        parsed = parse_group_callback(query.data)
+        file = None if parsed is None else self.pending.take_file(parsed[0], user.id, parsed[1])
+        if parsed is None or file is None:
+            await context.bot.send_message(user.id, messages.PREVIEW_EXPIRED)
+            return
+
+        async def reply(text: str, *, reply_markup: InlineKeyboardMarkup | None = None) -> object:
+            return await context.bot.send_message(user.id, text, reply_markup=reply_markup)
+
+        try:
+            if not await self._is_admin(parsed[1], user.id):
+                await reply(messages.UPLOAD_DENIED)
+                return
+        except ApplicationError as exc:
+            await reply(str(exc))
+            return
+        await self._preview(reply, user.id, parsed[1], file)
 
     async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -172,15 +254,17 @@ class UploadHandlers:
         if not parsed[0]:
             await context.bot.send_message(user.id, messages.CANCELLED)
             return
-        if not await self._is_admin(user.id):
-            await context.bot.send_message(user.id, messages.UPLOAD_DENIED)
-            return
         try:
+            if not await self._is_admin(preview.group_id, user.id):
+                await context.bot.send_message(user.id, messages.UPLOAD_DENIED)
+                return
             result = await self.imports.apply(preview)
         except ImportConflict:
             text = messages.APPLY_CONFLICT
         except ImportRejected:
             text = messages.APPLY_REJECTED
+        except ApplicationError as exc:
+            text = str(exc)
         else:
             text = messages.APPLIED.format(
                 created=result.created, updated=result.updated, unchanged=result.unchanged

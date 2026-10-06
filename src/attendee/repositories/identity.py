@@ -1,94 +1,59 @@
-"""Database access for identity records. Repositories never commit."""
+"""Group-scoped access to people. Repositories never commit."""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from attendee.persistence.models import Membership, Organization, Person
-
-
-class OrganizationRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
-
-    async def get(self, organization_id: int) -> Organization | None:
-        return await self.session.get(Organization, organization_id)
-
-    async def get_by_slug(self, slug: str) -> Organization | None:
-        return await self.session.scalar(select(Organization).where(Organization.slug == slug))
-
-    async def add(self, organization: Organization) -> Organization:
-        self.session.add(organization)
-        await self.session.flush()
-        return organization
+from attendee.persistence.models import Person
 
 
 class PersonRepository:
-    """Global identity. It has no organization scope and grants no access."""
+    """People of one group. A person in another group is never visible here (decision T82)."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, group_id: int) -> None:
         self.session = session
+        self.group_id = group_id
 
     async def get(self, person_id: int) -> Person | None:
-        return await self.session.get(Person, person_id)
+        return await self.session.scalar(
+            select(Person).where(Person.group_id == self.group_id, Person.id == person_id)
+        )
 
     async def get_by_telegram_user_id(self, telegram_user_id: int) -> Person | None:
         return await self.session.scalar(
-            select(Person).where(Person.telegram_user_id == telegram_user_id)
+            select(Person).where(
+                Person.group_id == self.group_id, Person.telegram_user_id == telegram_user_id
+            )
         )
-
-    async def list_by_telegram_user_ids(self, telegram_user_ids: set[int]) -> list[Person]:
-        if not telegram_user_ids:
-            return []
-        result = await self.session.scalars(
-            select(Person).where(Person.telegram_user_id.in_(telegram_user_ids))
-        )
-        return list(result)
 
     async def add(self, person: Person) -> Person:
+        if person.group_id != self.group_id:
+            raise ValueError("Person group differs from repository scope.")
         self.session.add(person)
         await self.session.flush()
         return person
 
-
-class MembershipRepository:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
-
-    async def get(self, organization_id: int, person_id: int) -> Membership | None:
-        return await self.session.scalar(
-            select(Membership).where(
-                Membership.organization_id == organization_id,
-                Membership.person_id == person_id,
-            )
+    async def members(self) -> list[Person]:
+        """Every person in the group, in person ID order."""
+        rows = await self.session.scalars(
+            select(Person).where(Person.group_id == self.group_id).order_by(Person.id)
         )
+        return list(rows)
 
-    async def add(self, membership: Membership) -> Membership:
-        self.session.add(membership)
-        await self.session.flush()
-        return membership
-
-    async def list_members(self, organization_id: int) -> list[tuple[Membership, Person]]:
-        """Every membership in the organization with its person, in person ID order."""
-        rows = await self.session.execute(
-            select(Membership, Person)
-            .join(Person, Person.id == Membership.person_id)
-            .where(Membership.organization_id == organization_id)
-            .order_by(Person.id)
+    async def member_ids(self) -> tuple[int, ...]:
+        rows = await self.session.scalars(
+            select(Person.id).where(Person.group_id == self.group_id).order_by(Person.id)
         )
-        return [(membership, person) for membership, person in rows.tuples()]
+        return tuple(rows)
 
-    async def find_unbound_people_by_handle(
-        self, organization_id: int, telegram_handle: str
-    ) -> list[Person]:
-        """Members of the organization with this canonical handle and no Telegram user ID."""
-        result = await self.session.scalars(
+    async def find_unbound_by_handle(self, telegram_handle: str) -> list[Person]:
+        """People of the group with this canonical handle and no Telegram user ID."""
+        rows = await self.session.scalars(
             select(Person)
-            .join(Membership, Membership.person_id == Person.id)
             .where(
-                Membership.organization_id == organization_id,
+                Person.group_id == self.group_id,
                 Person.telegram_handle == telegram_handle,
                 Person.telegram_user_id.is_(None),
             )
             .order_by(Person.id)
         )
-        return list(result)
+        return list(rows)

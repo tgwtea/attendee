@@ -53,11 +53,9 @@ def test_metadata_has_all_tables():
     from attendee.persistence import models  # noqa: F401
 
     assert set(Base.metadata.tables) == {
-        "organizations",
+        "groups",
         "people",
-        "memberships",
         "unresolved_matches",
-        "organization_chats",
         "session_publications",
         "attendance_series",
         "attendance_sessions",

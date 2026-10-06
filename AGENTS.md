@@ -24,7 +24,7 @@ Do not violate these rules.
 - The bot posts attendance polls in a Telegram group (PRD §12).
 - The bot collects reasons privately, in the private bot chat (PRD §14, §15).
 - The bot never shows a reason in the Telegram group (PRD §26).
-- Only configured admins see aggregate attendance, individual reasons, and admin reports (PRD §6, §26).
+- Only admins see aggregate attendance, individual reasons, and admin reports (PRD §6, §26). An admin is a Telegram `creator` or `administrator` of the group, checked with Telegram before each admin action (T83).
 - A member sees only their own response and their own reason (PRD §26).
 
 Attendance statuses (PRD §7):
@@ -135,8 +135,8 @@ The accepted stack is in `docs/decisions.md`. Do not reopen those choices withou
 
 - Use Python 3.13, `uv`, and the `src/attendee` package.
 - Keep ORM models separate from Pydantic DTOs (data transfer objects).
-- Keep organization scope explicit in services and repositories.
-- Use global person identity with organization memberships and organization-scoped roles.
+- Keep group scope explicit in services and repositories. A Telegram group owns all data (T80).
+- Give each group its own people. Store no admin list or role; ask Telegram (T82, T83).
 - Keep session roster snapshots fixed after creation.
 - Store custom fields in relational tables. Keep one current response and append-only audit history.
 - Let Alembic own schema changes. Never use runtime `create_all()`.
@@ -147,10 +147,8 @@ The accepted stack is in `docs/decisions.md`. Do not reopen those choices withou
 - Do not add pandas, a web framework, Redis, Celery, APScheduler, Sentry, or an extra logging framework.
 - Run Ruff lint, Ruff format checks, strict Pyright, and pytest before completion.
 
-The identity phase adds organizations, people, memberships, roles, authorization, and `attendee-setup`.
-The import phase adds namelist import (`attendee-import`), Telegram account matching, and unresolved matches.
-The onboarding phase adds `/start` account matching with name confirmation and namelist upload through Telegram.
-The attendance phase adds series, Draft sessions, fixed roster snapshots, and private `/attendance` creation.
-The publication phase adds group `/register` (several groups per organization, no channels) and private `/publish`
-with safe publish attempts (T55–T61). Responses are in progress. Reminders, closure, calculations, and exports remain deferred.
+The group phase (T80–T87) replaced organizations, memberships, roles, `attendee-setup`, and `/register`.
+The bot learns a group when it joins. Revision `0001_groups` is the baseline.
+Implemented: namelist import, account matching with name confirmation, Draft sessions, safe publication, responses,
+and `/stats` with XLSX export. Not built: linking from a poll tap, admin `/help`, reminders, closure, custom fields.
 Document future concepts without speculative feature code.

@@ -1,7 +1,8 @@
 """Private admin /stats flow: series, sessions, the PRD §19 view, and the XLSX export.
 
 Report rules stay in ReportService. The flow only reads, so its buttons keep no state:
-st:<action>:<id>. Each tap checks the private chat and the admin role again (decision T74).
+st:<action>:<group_id>:<id>. Each tap checks the private chat and asks Telegram for the admin
+role in that group again (decisions T74, T83).
 """
 
 import asyncio
@@ -12,11 +13,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import AccessDenied, ApplicationError
-from attendee.application.identity import IdentityService
+from attendee.application.groups import GroupAccess
 from attendee.application.reports import ReportService, SessionReport
-from attendee.domain.identity import MembershipRole
 from attendee.domain.reports import session_heading
 from attendee.domain.responses import ResponseStatus
 from attendee.reporting.workbook import build_workbook, filename
@@ -26,20 +25,23 @@ CALLBACK_PATTERN = r"^st:"
 PAGE_SIZE = 10
 
 
-def callback(action: str, value: int) -> str:
-    return f"st:{action}:{value}"
+def callback(action: str, group_id: int, value: int) -> str:
+    return f"st:{action}:{group_id}:{value}"
 
 
-def parse_callback(data: str | None) -> tuple[str, int] | None:
-    """p: series page, r: series, x: export, s: session, n/a/w: no response, responses, reasons."""
-    match = re.fullmatch(r"st:([prxsnaw]):([0-9]{1,19})", data or "")
-    return None if match is None else (match[1], int(match[2]))
+def parse_callback(data: str | None) -> tuple[str, int, int] | None:
+    """p: series page, r: series, x: export, s: session, n/a/w: no response, responses, reasons.
+
+    The group ID is a claim. Every action checks the admin role in that group first.
+    """
+    match = re.fullmatch(r"st:([prxsnaw]):([0-9]{1,19}):([0-9]{1,19})", data or "")
+    return None if match is None else (match[1], int(match[2]), int(match[3]))
 
 
-def _keyboard(rows: list[tuple[str, str, int]]) -> InlineKeyboardMarkup:
+def _keyboard(group_id: int, rows: list[tuple[str, str, int]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(label, callback_data=callback(action, value))]
+            [InlineKeyboardButton(label, callback_data=callback(action, group_id, value))]
             for label, action, value in rows
         ]
     )
@@ -101,24 +103,9 @@ def reasons_text(report: SessionReport) -> str:
 
 
 class StatsHandlers:
-    def __init__(
-        self,
-        organization_id: int,
-        identity: IdentityService,
-        authorization: AuthorizationService,
-        reports: ReportService,
-    ) -> None:
-        self.organization_id = organization_id
-        self.identity = identity
-        self.authorization = authorization
+    def __init__(self, access: GroupAccess, reports: ReportService) -> None:
+        self.access = access
         self.reports = reports
-
-    async def _actor(self, user_id: int) -> int:
-        person = await self.identity.find_by_telegram_user_id(user_id)
-        if person is None:
-            raise AccessDenied(messages.STATS_DENIED)
-        await self.authorization.require_role(self.organization_id, person.id, MembershipRole.ADMIN)
-        return person.id
 
     async def _reply(
         self, update: Update, text: str, keyboard: InlineKeyboardMarkup | None = None
@@ -135,7 +122,24 @@ class StatsHandlers:
         chat, user = update.effective_chat, update.effective_user
         if chat is None or user is None or chat.type != "private":
             return
-        await self._run(update, user.id, "p", 0)
+        try:
+            groups = await self.access.admin_groups(user.id)
+        except ApplicationError as exc:
+            await self._reply(update, str(exc))
+            return
+        if not groups:
+            await self._reply(update, messages.STATS_DENIED)
+        elif len(groups) == 1:
+            await self._run(update, user.id, "p", groups[0].id, 0)
+        else:
+            # A group button opens page 0 of that group's series.
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(group.title, callback_data=callback("p", group.id, 0))]
+                    for group in groups
+                ]
+            )
+            await self._reply(update, messages.SELECT_GROUP, keyboard)
 
     async def button(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -149,17 +153,19 @@ class StatsHandlers:
         await query.answer()
         await self._run(update, user.id, *parsed)
 
-    async def _run(self, update: Update, user_id: int, action: str, value: int) -> None:
+    async def _run(
+        self, update: Update, actor: int, action: str, group_id: int, value: int
+    ) -> None:
+        """`actor` is the Telegram user ID. Each service call checks the admin role."""
         try:
-            actor = await self._actor(user_id)
             if action == "p":
-                await self._series(update, actor, value)
+                await self._series(update, actor, group_id, value)
             elif action == "r":
-                await self._sessions(update, actor, value)
+                await self._sessions(update, actor, group_id, value)
             elif action == "x":
-                await self._export(update, actor, value)
+                await self._export(update, actor, group_id, value)
             else:
-                await self._session(update, actor, action, value)
+                await self._session(update, actor, action, group_id, value)
         except AccessDenied:
             await self._reply(update, messages.STATS_DENIED)
         except ApplicationError as exc:
@@ -168,10 +174,8 @@ class StatsHandlers:
             logging.getLogger(__name__).error("Report database operation failed")
             await self._reply(update, messages.STATS_DB_FAILED)
 
-    async def _series(self, update: Update, actor: int, page: int) -> None:
-        found = await self.reports.list_series(
-            self.organization_id, actor, page * PAGE_SIZE, PAGE_SIZE + 1
-        )
+    async def _series(self, update: Update, actor: int, group_id: int, page: int) -> None:
+        found = await self.reports.list_series(group_id, actor, page * PAGE_SIZE, PAGE_SIZE + 1)
         if not found and page == 0:
             await self._reply(update, messages.STATS_NO_SERIES)
             return
@@ -180,10 +184,10 @@ class StatsHandlers:
             rows.append((messages.PREVIOUS, "p", page - 1))
         if len(found) > PAGE_SIZE:
             rows.append((messages.NEXT, "p", page + 1))
-        await self._reply(update, messages.STATS_SELECT_SERIES, _keyboard(rows))
+        await self._reply(update, messages.STATS_SELECT_SERIES, _keyboard(group_id, rows))
 
-    async def _sessions(self, update: Update, actor: int, series_id: int) -> None:
-        series, sessions = await self.reports.list_sessions(self.organization_id, actor, series_id)
+    async def _sessions(self, update: Update, actor: int, group_id: int, series_id: int) -> None:
+        series, sessions = await self.reports.list_sessions(group_id, actor, series_id)
         rows = [
             (
                 messages.STATS_SESSION_BUTTON.format(
@@ -197,10 +201,12 @@ class StatsHandlers:
         ]
         rows.append((messages.STATS_EXPORT, "x", series_id))
         text = messages.STATS_SERIES if sessions else messages.STATS_SERIES_NO_SESSIONS
-        await self._reply(update, text.format(series=series), _keyboard(rows))
+        await self._reply(update, text.format(series=series), _keyboard(group_id, rows))
 
-    async def _session(self, update: Update, actor: int, action: str, session_id: int) -> None:
-        report = await self.reports.session_report(self.organization_id, actor, session_id)
+    async def _session(
+        self, update: Update, actor: int, action: str, group_id: int, session_id: int
+    ) -> None:
+        report = await self.reports.session_report(group_id, actor, session_id)
         if action == "n":
             await self._reply(update, no_response_text(report))
         elif action == "a":
@@ -209,16 +215,17 @@ class StatsHandlers:
             await self._reply(update, reasons_text(report))
         else:
             keyboard = _keyboard(
+                group_id,
                 [
                     (messages.STATS_VIEW_NO_RESPONSE, "n", session_id),
                     (messages.STATS_VIEW_RESPONSES, "a", session_id),
                     (messages.STATS_VIEW_REASONS, "w", session_id),
-                ]
+                ],
             )
             await self._reply(update, session_text(report), keyboard)
 
-    async def _export(self, update: Update, actor: int, series_id: int) -> None:
-        report = await self.reports.series_report(self.organization_id, actor, series_id)
+    async def _export(self, update: Update, actor: int, group_id: int, series_id: int) -> None:
+        report = await self.reports.series_report(group_id, actor, series_id)
         message = update.effective_message
         assert message is not None
         try:

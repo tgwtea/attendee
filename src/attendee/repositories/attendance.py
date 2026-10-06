@@ -1,4 +1,4 @@
-"""Organization-scoped attendance queries. Repositories never commit."""
+"""Group-scoped attendance queries. Repositories never commit."""
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,26 +6,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from attendee.persistence.models import (
     AttendanceSeries,
     AttendanceSession,
-    Membership,
+    Person,
     SessionRosterEntry,
 )
 
 
 class AttendanceRepository:
-    def __init__(self, session: AsyncSession, organization_id: int) -> None:
+    def __init__(self, session: AsyncSession, group_id: int) -> None:
         self.session = session
-        self.organization_id = organization_id
+        self.group_id = group_id
 
     async def add_series(self, series: AttendanceSeries) -> AttendanceSeries:
-        if series.organization_id != self.organization_id:
-            raise ValueError("Series organization differs from repository scope.")
+        if series.group_id != self.group_id:
+            raise ValueError("Series group differs from repository scope.")
         self.session.add(series)
         await self.session.flush()
         return series
 
     async def add_session(self, attendance: AttendanceSession) -> AttendanceSession:
-        if attendance.organization_id != self.organization_id:
-            raise ValueError("Session organization differs from repository scope.")
+        if attendance.group_id != self.group_id:
+            raise ValueError("Session group differs from repository scope.")
         self.session.add(attendance)
         await self.session.flush()
         return attendance
@@ -34,7 +34,7 @@ class AttendanceRepository:
         self.session.add_all(
             [
                 SessionRosterEntry(
-                    organization_id=self.organization_id, session_id=session_id, person_id=person_id
+                    group_id=self.group_id, session_id=session_id, person_id=person_id
                 )
                 for person_id in person_ids
             ]
@@ -44,7 +44,7 @@ class AttendanceRepository:
     async def series(self, series_id: int) -> AttendanceSeries | None:
         return await self.session.scalar(
             select(AttendanceSeries).where(
-                AttendanceSeries.organization_id == self.organization_id,
+                AttendanceSeries.group_id == self.group_id,
                 AttendanceSeries.id == series_id,
             )
         )
@@ -52,7 +52,7 @@ class AttendanceRepository:
     async def series_by_name(self, normalized_name: str) -> AttendanceSeries | None:
         return await self.session.scalar(
             select(AttendanceSeries).where(
-                AttendanceSeries.organization_id == self.organization_id,
+                AttendanceSeries.group_id == self.group_id,
                 AttendanceSeries.normalized_name == normalized_name,
             )
         )
@@ -61,7 +61,7 @@ class AttendanceRepository:
         rows = await self.session.scalars(
             select(AttendanceSeries)
             .where(
-                AttendanceSeries.organization_id == self.organization_id,
+                AttendanceSeries.group_id == self.group_id,
             )
             .order_by(AttendanceSeries.normalized_name, AttendanceSeries.id)
             .offset(offset)
@@ -71,18 +71,14 @@ class AttendanceRepository:
 
     async def required_people(self) -> tuple[int, ...]:
         rows = await self.session.scalars(
-            select(Membership.person_id)
-            .where(
-                Membership.organization_id == self.organization_id,
-            )
-            .order_by(Membership.person_id)
+            select(Person.id).where(Person.group_id == self.group_id).order_by(Person.id)
         )
         return tuple(rows)
 
     async def session_by_key(self, key: str) -> AttendanceSession | None:
         return await self.session.scalar(
             select(AttendanceSession).where(
-                AttendanceSession.organization_id == self.organization_id,
+                AttendanceSession.group_id == self.group_id,
                 AttendanceSession.creation_key == key,
             )
         )
@@ -90,7 +86,7 @@ class AttendanceRepository:
     async def get_session(self, session_id: int) -> AttendanceSession | None:
         return await self.session.scalar(
             select(AttendanceSession).where(
-                AttendanceSession.organization_id == self.organization_id,
+                AttendanceSession.group_id == self.group_id,
                 AttendanceSession.id == session_id,
             )
         )
@@ -99,7 +95,7 @@ class AttendanceRepository:
         rows = await self.session.scalars(
             select(SessionRosterEntry.person_id)
             .where(
-                SessionRosterEntry.organization_id == self.organization_id,
+                SessionRosterEntry.group_id == self.group_id,
                 SessionRosterEntry.session_id == session_id,
             )
             .order_by(SessionRosterEntry.person_id)

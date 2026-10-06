@@ -3,6 +3,7 @@ import secrets
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from conftest import ADMIN_ID, add_group
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -13,26 +14,21 @@ from attendee.application.attendance import (
     RosterChanged,
     SessionInput,
 )
-from attendee.application.errors import AccessDenied, NotFound
+from attendee.application.errors import AccessDenied, AdminCheckFailed, NotFound
+from attendee.application.groups import GroupAccess, GroupService
 from attendee.application.identity import IdentityService
-from attendee.application.memberships import MembershipService
-from attendee.application.organizations import OrganizationService
 from attendee.domain.attendance import SessionStatus, check_deadline, parse_date, parse_deadline
-from attendee.domain.identity import MembershipRole
 from attendee.persistence.database import create_engine, create_session_factory
 from attendee.persistence.models import (
     AttendanceSeries,
     AttendanceSession,
-    Membership,
     Person,
     SessionRosterEntry,
 )
 
 
-async def add_member(factory, org, name="Member", role=MembershipRole.MEMBER, telegram_id=None):
-    person = await IdentityService(factory).create_person(name, telegram_id)
-    await MembershipService(factory).add_membership(org, person.id, role)
-    return person
+async def add_member(factory, group_id, name="Member", telegram_id=None):
+    return await IdentityService(factory).create_person(group_id, name, telegram_id)
 
 
 def request(**changes):
@@ -48,64 +44,59 @@ def request(**changes):
 
 
 async def create(club, **changes):
-    org, admin, _, service = club
-    preview = await service.preview_session(org.id, admin.id, request(**changes))
-    return await service.create_session(org.id, admin.id, preview)
+    group, admin, _, service = club
+    preview = await service.preview_session(group.id, admin, request(**changes))
+    return await service.create_session(group.id, admin, preview)
 
 
-async def test_series_names_and_organization_isolation(attendance_club, session_factory):
-    org, admin, _, service = attendance_club
-    first = await service.create_series(org.id, admin.id, "  Patrons   Day ")
+async def test_series_names_and_group_isolation(attendance_club, session_factory, admins):
+    group, admin, _, service = attendance_club
+    first = await service.create_series(group.id, admin, "  Patrons   Day ")
     assert first.name == "Patrons Day"
+    assert first.created_by == ADMIN_ID
     with pytest.raises(DuplicateSeries):
-        await service.create_series(org.id, admin.id, "PATRONS DAY")
+        await service.create_series(group.id, admin, "PATRONS DAY")
     # Punctuation remains significant by the approved rule.
-    await service.create_series(org.id, admin.id, "Patron's Day")
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
-    await MembershipService(session_factory).add_membership(
-        other.id, admin.id, MembershipRole.ADMIN
-    )
-    await service.create_series(other.id, admin.id, "Patrons Day")
-    assert len(await service.list_series(org.id, admin.id)) == 2
-    assert len(await service.list_series(other.id, admin.id)) == 1
+    await service.create_series(group.id, admin, "Patron's Day")
+    other = await add_group(session_factory, -200, "Other")
+    admins.grant(other.telegram_chat_id, admin)
+    await service.create_series(other.id, admin, "Patrons Day")
+    assert len(await service.list_series(group.id, admin)) == 2
+    assert len(await service.list_series(other.id, admin)) == 1
     with pytest.raises(NotFound):
         await service.preview_session(
-            other.id, admin.id, request(series_id=first.id, new_series_name=None)
+            other.id, admin, request(series_id=first.id, new_series_name=None)
         )
 
 
 async def test_concurrent_series_creation(attendance_club):
-    org, admin, _, service = attendance_club
+    group, admin, _, service = attendance_club
     results = await asyncio.gather(
-        *[
-            service.create_series(org.id, admin.id, name)
-            for name in ("New Series", " new  SERIES ")
-        ],
+        *[service.create_series(group.id, admin, name) for name in ("New Series", " new  SERIES ")],
         return_exceptions=True,
     )
     assert sum(isinstance(value, DuplicateSeries) for value in results) == 1
-    assert len(await service.list_series(org.id, admin.id)) == 1
+    assert len(await service.list_series(group.id, admin)) == 1
 
 
 async def test_fixed_roster_and_persistent_draft(
-    attendance_club, session_factory, migrated_settings
+    attendance_club, session_factory, migrated_settings, admins
 ):
-    org, admin, member, service = attendance_club
+    group, admin, member, service = attendance_club
     saved = await create(attendance_club)
     assert saved.status is SessionStatus.DRAFT
-    assert saved.person_ids == (admin.id, member.id)
-    await add_member(session_factory, org.id, "Later")
+    # The roster is the namelist. A group admin who is not on it is not on the roster.
+    assert saved.person_ids == (member.id,)
+    await add_member(session_factory, group.id, "Later")
     async with session_factory.begin() as session:
-        await session.execute(
-            update(Membership).where(Membership.person_id == member.id).values(role="admin")
-        )
         await session.execute(
             update(Person).where(Person.id == member.id).values(display_name="Renamed")
         )
     engine = create_engine(migrated_settings)
     try:
-        read = await AttendanceService(create_session_factory(engine)).get_session(
-            org.id, admin.id, saved.id
+        factory = create_session_factory(engine)
+        read = await AttendanceService(factory, GroupAccess(factory, admins)).get_session(
+            group.id, admin, saved.id
         )
         assert read.person_ids == saved.person_ids
         assert read.deadline.tzinfo is UTC
@@ -113,29 +104,30 @@ async def test_fixed_roster_and_persistent_draft(
         await engine.dispose()
     with pytest.raises(IntegrityError):
         async with session_factory.begin() as session:
-            await session.execute(delete(Membership).where(Membership.person_id == member.id))
+            await session.execute(delete(Person).where(Person.id == member.id))
 
 
 async def test_roster_change_requires_new_confirmation(attendance_club, session_factory):
-    org, admin, member, service = attendance_club
-    preview = await service.preview_session(org.id, admin.id, request())
-    # Replace a membership; the count remains equal but its identity changes.
+    group, admin, member, service = attendance_club
+    preview = await service.preview_session(group.id, admin, request())
+    # Replace a person; the count remains equal but its identity changes.
+    # Add first: SQLite reuses the highest deleted row ID.
+    replacement = await add_member(session_factory, group.id, "Replacement")
     async with session_factory.begin() as session:
-        await session.execute(delete(Membership).where(Membership.person_id == member.id))
-    replacement = await add_member(session_factory, org.id, "Replacement")
+        await session.execute(delete(Person).where(Person.id == member.id))
     with pytest.raises(RosterChanged):
-        await service.create_session(org.id, admin.id, preview)
-    assert await service.list_series(org.id, admin.id) == []
-    fresh = await service.preview_session(org.id, admin.id, preview.request)
-    saved = await service.create_session(org.id, admin.id, fresh)
-    assert saved.person_ids == (admin.id, replacement.id)
+        await service.create_session(group.id, admin, preview)
+    assert await service.list_series(group.id, admin) == []
+    fresh = await service.preview_session(group.id, admin, preview.request)
+    saved = await service.create_session(group.id, admin, fresh)
+    assert saved.person_ids == (replacement.id,)
 
 
 async def test_deadline_read_does_not_change_status(attendance_club, session_factory):
-    org, admin, _, service = attendance_club
+    group, admin, _, service = attendance_club
     saved = await create(attendance_club)
     after = saved.deadline + timedelta(seconds=1)
-    assert (await service.get_session(org.id, admin.id, saved.id, after)).display_status == "Draft"
+    assert (await service.get_session(group.id, admin, saved.id, after)).display_status == "Draft"
     # A fixture opens the session. test_publication.py covers the real draft->open change.
     async with session_factory.begin() as session:
         await session.execute(
@@ -146,7 +138,7 @@ async def test_deadline_read_does_not_change_status(attendance_club, session_fac
         (saved.deadline, "Open"),
         (after, "Deadline Passed"),
     ):
-        read = await service.get_session(org.id, admin.id, saved.id, now)
+        read = await service.get_session(group.id, admin, saved.id, now)
         assert read.display_status == expected
         assert read.status is SessionStatus.OPEN
     async with session_factory.begin() as session:
@@ -155,71 +147,79 @@ async def test_deadline_read_does_not_change_status(attendance_club, session_fac
             .where(AttendanceSession.id == saved.id)
             .values(status="closed")
         )
-    assert (await service.get_session(org.id, admin.id, saved.id, after)).display_status == "Closed"
+    assert (await service.get_session(group.id, admin, saved.id, after)).display_status == "Closed"
 
 
 async def test_archived_after_a_week_in_any_status(attendance_club, archive_after):
-    org, admin, _, service = attendance_club
+    group, admin, _, service = attendance_club
     saved = await create(attendance_club)
     week = saved.deadline + archive_after
-    assert (await service.get_session(org.id, admin.id, saved.id, week)).display_status == "Draft"
+    assert (await service.get_session(group.id, admin, saved.id, week)).display_status == "Draft"
     later = week + timedelta(seconds=1)
-    read = await service.get_session(org.id, admin.id, saved.id, later)
+    read = await service.get_session(group.id, admin, saved.id, later)
     # Archived is derived. The stored status and the session stay for export.
     assert (read.display_status, read.status) == ("Archived", SessionStatus.DRAFT)
 
 
-async def test_authorization_on_every_operation(attendance_club, session_factory):
-    org, admin, member, service = attendance_club
-    preview = await service.preview_session(org.id, admin.id, request())
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
-    outsider = await add_member(session_factory, other.id, "Other admin", MembershipRole.ADMIN)
-    saved = await service.create_session(org.id, admin.id, preview)
-    for person in (member, outsider):
+async def test_authorization_on_every_operation(attendance_club, session_factory, admins):
+    group, admin, member, service = attendance_club
+    preview = await service.preview_session(group.id, admin, request())
+    other = await add_group(session_factory, -200, "Other")
+    outsider = 2002
+    admins.grant(other.telegram_chat_id, outsider)
+    saved = await service.create_session(group.id, admin, preview)
+    # A namelist member and an admin of another group are not admins of this group.
+    for user in (5001, outsider):
         for operation in (
-            lambda person=person: service.create_series(org.id, person.id, "Denied"),
-            lambda person=person: service.list_series(org.id, person.id),
-            lambda person=person: service.preview_session(org.id, person.id, request()),
-            lambda person=person: service.create_session(org.id, person.id, preview),
-            lambda person=person: service.get_session(org.id, person.id, saved.id),
+            lambda user=user: service.create_series(group.id, user, "Denied"),
+            lambda user=user: service.list_series(group.id, user),
+            lambda user=user: service.preview_session(group.id, user, request()),
+            lambda user=user: service.create_session(group.id, user, preview),
+            lambda user=user: service.get_session(group.id, user, saved.id),
         ):
             with pytest.raises(AccessDenied):
                 await operation()
-    async with session_factory.begin() as session:
-        await session.execute(
-            update(Membership).where(Membership.person_id == admin.id).values(role="member")
-        )
+    # Telegram demotes the admin: the next operation stops at once (decision T83).
+    admins.revoke(group.telegram_chat_id, admin)
     with pytest.raises(AccessDenied):
-        await service.create_session(org.id, admin.id, preview)
+        await service.create_session(group.id, admin, preview)
+    admins.grant(group.telegram_chat_id, admin)
+    admins.fail = True
+    with pytest.raises(AdminCheckFailed):
+        await service.list_series(group.id, admin)
+    admins.fail = False
+    # The bot left the group: its admins lose access, and the data stays.
+    await GroupService(session_factory).left(group.telegram_chat_id)
+    with pytest.raises(AccessDenied):
+        await service.list_series(group.id, admin)
 
 
-async def test_creation_key_retries_and_conflicts(attendance_club, session_factory):
-    org, admin, _, service = attendance_club
-    preview = await service.preview_session(org.id, admin.id, request())
+async def test_creation_key_retries_and_conflicts(attendance_club, session_factory, admins):
+    group, admin, _, service = attendance_club
+    preview = await service.preview_session(group.id, admin, request())
     results = await asyncio.gather(
-        *[service.create_session(org.id, admin.id, preview) for _ in range(2)]
+        *[service.create_session(group.id, admin, preview) for _ in range(2)]
     )
     assert results[0].id == results[1].id
-    await add_member(session_factory, org.id, "Later")
-    assert (await service.create_session(org.id, admin.id, preview)).id == results[0].id
+    await add_member(session_factory, group.id, "Later")
+    assert (await service.create_session(group.id, admin, preview)).id == results[0].id
     changed = preview.model_copy(
         update={"request": preview.request.model_copy(update={"label": "Changed"})}
     )
     with pytest.raises(CreationConflict):
-        await service.create_session(org.id, admin.id, changed)
-    other_admin = await add_member(session_factory, org.id, "Admin two", MembershipRole.ADMIN)
+        await service.create_session(group.id, admin, changed)
+    other_admin = 1002
+    admins.grant(group.telegram_chat_id, other_admin)
     with pytest.raises(CreationConflict):
-        await service.create_session(org.id, other_admin.id, preview)
+        await service.create_session(group.id, other_admin, preview)
 
 
-async def test_database_constraints(attendance_club, session_factory):
-    org, admin, member, service = attendance_club
+async def test_database_constraints(attendance_club, session_factory, admins):
+    group, admin, member, service = attendance_club
     saved = await create(attendance_club)
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
-    await MembershipService(session_factory).add_membership(
-        other.id, admin.id, MembershipRole.ADMIN
-    )
-    other_series = await service.create_series(other.id, admin.id, "Other")
+    other = await add_group(session_factory, -200, "Other")
+    admins.grant(other.telegram_chat_id, admin)
+    other_series = await service.create_series(other.id, admin, "Other")
     operations = [
         update(AttendanceSession)
         .where(AttendanceSession.id == saved.id)
@@ -229,7 +229,8 @@ async def test_database_constraints(attendance_club, session_factory):
         .values(status="deadline_passed"),
         update(SessionRosterEntry)
         .where(SessionRosterEntry.person_id == member.id)
-        .values(organization_id=other.id),
+        .values(group_id=other.id),
+        update(AttendanceSeries).where(AttendanceSeries.id == other_series.id).values(created_by=0),
     ]
     for operation in operations:
         with pytest.raises(IntegrityError):
@@ -238,17 +239,17 @@ async def test_database_constraints(attendance_club, session_factory):
     with pytest.raises(IntegrityError):
         async with session_factory.begin() as session:
             session.add(
-                SessionRosterEntry(organization_id=org.id, session_id=saved.id, person_id=member.id)
+                SessionRosterEntry(group_id=group.id, session_id=saved.id, person_id=member.id)
             )
     with pytest.raises(NotFound):
-        await service.get_session(other.id, admin.id, saved.id)
+        await service.get_session(other.id, admin, saved.id)
 
 
 async def test_atomic_rollback_after_snapshot_failure(
     attendance_club, session_factory, monkeypatch
 ):
-    org, admin, _, service = attendance_club
-    preview = await service.preview_session(org.id, admin.id, request())
+    group, admin, _, service = attendance_club
+    preview = await service.preview_session(group.id, admin, request())
     original = service._result
 
     async def fail(*args, **kwargs):
@@ -257,27 +258,19 @@ async def test_atomic_rollback_after_snapshot_failure(
 
     monkeypatch.setattr(service, "_result", fail)
     with pytest.raises(RuntimeError):
-        await service.create_session(org.id, admin.id, preview)
+        await service.create_session(group.id, admin, preview)
     async with session_factory() as session:
         for model in (AttendanceSeries, AttendanceSession, SessionRosterEntry):
             assert await session.scalar(select(func.count()).select_from(model)) == 0
 
 
 async def test_500_member_snapshot(attendance_club, session_factory):
-    org, admin, _, service = attendance_club
+    group, admin, _, service = attendance_club
     async with session_factory.begin() as session:
-        people = [Person(display_name=f"Member {i}") for i in range(498)]
-        session.add_all(people)
-        await session.flush()
-        session.add_all(
-            [
-                Membership(organization_id=org.id, person_id=p.id, role=MembershipRole.MEMBER)
-                for p in people
-            ]
-        )
+        session.add_all([Person(group_id=group.id, display_name=f"Member {i}") for i in range(499)])
     saved = await create(attendance_club)
     assert len(saved.person_ids) == len(set(saved.person_ids)) == 500
-    assert len((await service.get_session(org.id, admin.id, saved.id)).person_ids) == 500
+    assert len((await service.get_session(group.id, admin, saved.id)).person_ids) == 500
 
 
 @pytest.mark.parametrize("value", ["2026-10-12", "12 Oct 2026", "12 oct 2026"])

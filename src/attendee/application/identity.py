@@ -1,4 +1,4 @@
-"""Global person identity. These operations grant no organization access."""
+"""People of one group. These operations grant no access."""
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -7,6 +7,7 @@ from attendee.application.dto import PersonDTO
 from attendee.application.errors import DuplicateTelegramUserId, NotFound
 from attendee.domain.identity import normalize_handle
 from attendee.persistence.models import Person
+from attendee.repositories.groups import GroupRepository
 from attendee.repositories.identity import PersonRepository
 
 
@@ -26,11 +27,12 @@ class IdentityService:
 
     async def create_person(
         self,
+        group_id: int,
         display_name: str | None,
         telegram_user_id: int | None = None,
         telegram_handle: str | None = None,
     ) -> PersonDTO:
-        """Always create a new person. Equal names never merge two people."""
+        """Always create a new person in the group. Equal names never merge two people."""
         display_name = _clean(display_name)
         if display_name is None and telegram_user_id is None:
             raise ValueError("A person needs a display name or a Telegram user ID")
@@ -39,7 +41,9 @@ class IdentityService:
         telegram_handle = _handle(telegram_handle)
         try:
             async with self.session_factory.begin() as session:
-                people = PersonRepository(session)
+                if await GroupRepository(session).get(group_id) is None:
+                    raise NotFound(f"Group {group_id}")
+                people = PersonRepository(session, group_id)
                 if (
                     telegram_user_id is not None
                     and await people.get_by_telegram_user_id(telegram_user_id) is not None
@@ -47,6 +51,7 @@ class IdentityService:
                     raise DuplicateTelegramUserId(telegram_user_id)
                 person = await people.add(
                     Person(
+                        group_id=group_id,
                         display_name=display_name,
                         telegram_user_id=telegram_user_id,
                         telegram_handle=telegram_handle,
@@ -56,16 +61,22 @@ class IdentityService:
         except IntegrityError as exc:
             raise DuplicateTelegramUserId(telegram_user_id) from exc
 
-    async def find_by_telegram_user_id(self, telegram_user_id: int) -> PersonDTO | None:
+    async def find_by_telegram_user_id(
+        self, group_id: int, telegram_user_id: int
+    ) -> PersonDTO | None:
         async with self.session_factory() as session:
-            person = await PersonRepository(session).get_by_telegram_user_id(telegram_user_id)
+            person = await PersonRepository(session, group_id).get_by_telegram_user_id(
+                telegram_user_id
+            )
             return None if person is None else PersonDTO.model_validate(person)
 
-    async def change_handle(self, person_id: int, telegram_handle: str | None) -> PersonDTO:
+    async def change_handle(
+        self, group_id: int, person_id: int, telegram_handle: str | None
+    ) -> PersonDTO:
         """Change the handle only. The person and Telegram user ID stay the same."""
         telegram_handle = _handle(telegram_handle)
         async with self.session_factory.begin() as session:
-            person = await PersonRepository(session).get(person_id)
+            person = await PersonRepository(session, group_id).get(person_id)
             if person is None:
                 raise NotFound(f"Person {person_id}")
             person.telegram_handle = telegram_handle

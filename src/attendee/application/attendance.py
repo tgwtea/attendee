@@ -8,22 +8,21 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee import copy
-from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import ApplicationError, NotFound
+from attendee.application.groups import GroupAccess
 from attendee.domain.attendance import (
     SessionStatus,
     clean_name,
     display_status,
     normalize_series_name,
 )
-from attendee.domain.identity import MembershipRole
 from attendee.persistence.database import write_session
 from attendee.persistence.models import AttendanceSeries, AttendanceSession
 from attendee.repositories.attendance import AttendanceRepository
 
 
 class DuplicateSeries(ApplicationError):
-    """An organization already has this normalized series name."""
+    """A group already has this normalized series name."""
 
 
 class RosterChanged(ApplicationError):
@@ -37,7 +36,7 @@ class CreationConflict(ApplicationError):
 class SeriesDTO(BaseModel):
     model_config = ConfigDict(frozen=True, from_attributes=True)
     id: int
-    organization_id: int
+    group_id: int
     name: str
     created_by: int
     created_at: datetime
@@ -79,7 +78,7 @@ class SessionPreview(BaseModel):
 class SessionDTO(BaseModel):
     model_config = ConfigDict(frozen=True)
     id: int
-    organization_id: int
+    group_id: int
     series_id: int
     series_name: str
     session_date: date
@@ -93,23 +92,25 @@ class SessionDTO(BaseModel):
 
 
 class AttendanceService:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self.session_factory = session_factory
-        self.authorization = AuthorizationService(session_factory)
+    """`actor_id` is the Telegram user ID of a group admin (decision T83).
 
-    async def _authorize(self, organization_id: int, actor_id: int, session: AsyncSession) -> None:
-        await self.authorization.require_role(
-            organization_id, actor_id, MembershipRole.ADMIN, session
-        )
+    Each operation asks Telegram for the admin role before its transaction starts.
+    """
+
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], access: GroupAccess
+    ) -> None:
+        self.session_factory = session_factory
+        self.access = access
 
     async def list_series(
-        self, organization_id: int, actor_id: int, offset: int = 0, limit: int = 11
+        self, group_id: int, actor_id: int, offset: int = 0, limit: int = 11
     ) -> list[SeriesDTO]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("Invalid series page.")
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            rows = await AttendanceRepository(session, organization_id).list_series(offset, limit)
+            rows = await AttendanceRepository(session, group_id).list_series(offset, limit)
             return [SeriesDTO.model_validate(row) for row in rows]
 
     async def _add_series(
@@ -120,28 +121,26 @@ class AttendanceService:
         if await repository.series_by_name(normalized) is not None:
             raise DuplicateSeries(copy.SERIES_EXISTS)
         row = AttendanceSeries(
-            organization_id=repository.organization_id,
+            group_id=repository.group_id,
             name=name,
             normalized_name=normalized,
             created_by=actor_id,
         )
         return await repository.add_series(row)
 
-    async def create_series(self, organization_id: int, actor_id: int, name: str) -> SeriesDTO:
+    async def create_series(self, group_id: int, actor_id: int, name: str) -> SeriesDTO:
+        await self.access.require_admin(group_id, actor_id)
         async with write_session(self.session_factory) as session:
-            await self._authorize(organization_id, actor_id, session)
-            row = await self._add_series(
-                AttendanceRepository(session, organization_id), actor_id, name
-            )
+            row = await self._add_series(AttendanceRepository(session, group_id), actor_id, name)
             result = SeriesDTO.model_validate(row)
         return result
 
     async def preview_session(
-        self, organization_id: int, actor_id: int, request: SessionInput
+        self, group_id: int, actor_id: int, request: SessionInput
     ) -> SessionPreview:
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            repository = AttendanceRepository(session, organization_id)
+            repository = AttendanceRepository(session, group_id)
             if request.series_id is not None:
                 series = await repository.series(request.series_id)
                 if series is None:
@@ -157,13 +156,13 @@ class AttendanceService:
             )
 
     async def create_session(
-        self, organization_id: int, actor_id: int, preview: SessionPreview
+        self, group_id: int, actor_id: int, preview: SessionPreview
     ) -> SessionDTO:
         fingerprint = hashlib.sha256(preview.model_dump_json().encode()).hexdigest()
         request = preview.request
+        await self.access.require_admin(group_id, actor_id)
         async with write_session(self.session_factory) as session:
-            await self._authorize(organization_id, actor_id, session)
-            repository = AttendanceRepository(session, organization_id)
+            repository = AttendanceRepository(session, group_id)
             existing = await repository.session_by_key(request.creation_key)
             if existing is not None:
                 if existing.created_by != actor_id or existing.request_fingerprint != fingerprint:
@@ -180,7 +179,7 @@ class AttendanceService:
                 assert request.new_series_name is not None
                 series = await self._add_series(repository, actor_id, request.new_series_name)
             row = AttendanceSession(
-                organization_id=organization_id,
+                group_id=group_id,
                 series_id=series.id,
                 session_date=request.session_date,
                 label=request.label,
@@ -195,11 +194,11 @@ class AttendanceService:
         return result
 
     async def get_session(
-        self, organization_id: int, actor_id: int, session_id: int, now: datetime | None = None
+        self, group_id: int, actor_id: int, session_id: int, now: datetime | None = None
     ) -> SessionDTO:
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            repository = AttendanceRepository(session, organization_id)
+            repository = AttendanceRepository(session, group_id)
             row = await repository.get_session(session_id)
             if row is None:
                 raise NotFound(copy.SESSION_NOT_FOUND)
@@ -213,7 +212,7 @@ class AttendanceService:
         status = SessionStatus(row.status)
         return SessionDTO(
             id=row.id,
-            organization_id=row.organization_id,
+            group_id=row.group_id,
             series_id=row.series_id,
             series_name=series.name,
             session_date=row.session_date,

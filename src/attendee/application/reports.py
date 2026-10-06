@@ -10,10 +10,9 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee import copy
-from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import NotFound
+from attendee.application.groups import GroupAccess
 from attendee.domain.attendance import SessionStatus, display_status, is_archived
-from attendee.domain.identity import MembershipRole
 from attendee.domain.reports import Cell, cell, is_complete, member_name
 from attendee.domain.responses import ResponseStatus
 from attendee.persistence.models import AttendanceSession, Person
@@ -85,36 +84,35 @@ def _sort_key(person: Person) -> tuple[str, int]:
 
 
 class ReportService:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self.session_factory = session_factory
-        self.authorization = AuthorizationService(session_factory)
+    """`actor_id` is the Telegram user ID of a group admin (decision T83)."""
 
-    async def _authorize(self, organization_id: int, actor_id: int, session: AsyncSession) -> None:
-        await self.authorization.require_role(
-            organization_id, actor_id, MembershipRole.ADMIN, session
-        )
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], access: GroupAccess
+    ) -> None:
+        self.session_factory = session_factory
+        self.access = access
 
     async def list_series(
-        self, organization_id: int, actor_id: int, offset: int = 0, limit: int = 11
+        self, group_id: int, actor_id: int, offset: int = 0, limit: int = 11
     ) -> list[SeriesChoice]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("Invalid series page.")
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            rows = await ReportRepository(session, organization_id).series_with_polls(offset, limit)
+            rows = await ReportRepository(session, group_id).series_with_polls(offset, limit)
             return [SeriesChoice(id=row.id, name=row.name) for row in rows]
 
     async def list_sessions(
-        self, organization_id: int, actor_id: int, series_id: int, now: datetime | None = None
+        self, group_id: int, actor_id: int, series_id: int, now: datetime | None = None
     ) -> tuple[str, list[SessionChoice]]:
         """The series name, and its sessions that are not Drafts or archived, newest first (T69)."""
         now = now or datetime.now(UTC)
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            series = await AttendanceRepository(session, organization_id).series(series_id)
+            series = await AttendanceRepository(session, group_id).series(series_id)
             if series is None:
                 raise NotFound(copy.STATS_SERIES_NOT_FOUND)
-            rows = await ReportRepository(session, organization_id).sessions(series_id)
+            rows = await ReportRepository(session, group_id).sessions(series_id)
             return series.name, [
                 SessionChoice(
                     id=row.id,
@@ -127,18 +125,18 @@ class ReportService:
             ]
 
     async def session_report(
-        self, organization_id: int, actor_id: int, session_id: int, now: datetime | None = None
+        self, group_id: int, actor_id: int, session_id: int, now: datetime | None = None
     ) -> SessionReport:
         now = now or datetime.now(UTC)
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            attendance = AttendanceRepository(session, organization_id)
+            attendance = AttendanceRepository(session, group_id)
             row = await attendance.get_session(session_id)
             if row is None or row.status == SessionStatus.DRAFT:
                 raise NotFound(copy.SESSION_NOT_FOUND)
             series = await attendance.series(row.series_id)
             assert series is not None
-            reports = ReportRepository(session, organization_id)
+            reports = ReportRepository(session, group_id)
             people = [person for _, person in await reports.roster_people([row.id])]
             answers = {
                 response.person_id: response for response in await reports.responses([row.id])
@@ -162,16 +160,16 @@ class ReportService:
             )
 
     async def series_report(
-        self, organization_id: int, actor_id: int, series_id: int, now: datetime | None = None
+        self, group_id: int, actor_id: int, series_id: int, now: datetime | None = None
     ) -> SeriesReport:
         """Every session that is not a Draft, archived ones included (decision T69)."""
         now = now or datetime.now(UTC)
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            series = await AttendanceRepository(session, organization_id).series(series_id)
+            series = await AttendanceRepository(session, group_id).series(series_id)
             if series is None:
                 raise NotFound(copy.STATS_SERIES_NOT_FOUND)
-            reports = ReportRepository(session, organization_id)
+            reports = ReportRepository(session, group_id)
             rows = await reports.sessions(series_id)
             complete = {
                 row.id: is_complete(SessionStatus(row.status), row.deadline, now) for row in rows

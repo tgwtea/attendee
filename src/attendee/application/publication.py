@@ -14,11 +14,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee import copy
-from attendee.application.authorization import AuthorizationService
-from attendee.application.chats import ChatDTO
 from attendee.application.errors import ApplicationError, NotFound
+from attendee.application.groups import GroupAccess, GroupDTO
 from attendee.domain.attendance import SessionStatus, archive_cutoff, is_archived
-from attendee.domain.identity import MembershipRole
 from attendee.domain.publication import (
     PUBLISH_LEASE,
     PublicationStatus,
@@ -28,8 +26,8 @@ from attendee.domain.publication import (
 from attendee.persistence.database import write_session
 from attendee.persistence.models import AttendanceSession, SessionPublication
 from attendee.repositories.attendance import AttendanceRepository
-from attendee.repositories.chats import ChatRepository
-from attendee.repositories.publication import PublicationRepository
+from attendee.repositories.groups import GroupRepository
+from attendee.repositories.publication import PublicationRepository, expired_attempts
 
 
 class PublishRejected(Exception):
@@ -83,29 +81,29 @@ class DraftDTO(BaseModel):
 class PublicationReview(BaseModel):
     model_config = ConfigDict(frozen=True)
     draft: DraftDTO
-    chat: ChatDTO
+    group: GroupDTO
     text: str
 
 
 class PublicationService:
+    """A session posts to its own group (decision T87). `actor_id` is a Telegram user ID."""
+
     def __init__(
-        self, session_factory: async_sessionmaker[AsyncSession], timezone: str = "Asia/Singapore"
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        access: GroupAccess,
+        timezone: str = "Asia/Singapore",
     ) -> None:
         self.session_factory = session_factory
+        self.access = access
         self.timezone = timezone
-        self.authorization = AuthorizationService(session_factory)
-
-    async def _authorize(self, organization_id: int, actor_id: int, session: AsyncSession) -> None:
-        await self.authorization.require_role(
-            organization_id, actor_id, MembershipRole.ADMIN, session
-        )
 
     async def _draft(
-        self, session: AsyncSession, organization_id: int, row: AttendanceSession
+        self, session: AsyncSession, group_id: int, row: AttendanceSession
     ) -> DraftDTO:
-        series = await AttendanceRepository(session, organization_id).series(row.series_id)
+        series = await AttendanceRepository(session, group_id).series(row.series_id)
         assert series is not None
-        active = await PublicationRepository(session, organization_id).active(row.id)
+        active = await PublicationRepository(session, group_id).active(row.id)
         return DraftDTO(
             id=row.id,
             series_name=series.name,
@@ -129,9 +127,9 @@ class PublicationService:
             await repository.session.flush()
 
     async def _require_draft(
-        self, session: AsyncSession, organization_id: int, session_id: int, now: datetime
+        self, session: AsyncSession, group_id: int, session_id: int, now: datetime
     ) -> AttendanceSession:
-        row = await AttendanceRepository(session, organization_id).get_session(session_id)
+        row = await AttendanceRepository(session, group_id).get_session(session_id)
         if row is None:
             raise NotFound(copy.SESSION_NOT_FOUND)
         if row.status != SessionStatus.DRAFT:
@@ -142,7 +140,7 @@ class PublicationService:
 
     async def list_drafts(
         self,
-        organization_id: int,
+        group_id: int,
         actor_id: int,
         offset: int = 0,
         limit: int = 11,
@@ -150,12 +148,12 @@ class PublicationService:
     ) -> list[DraftDTO]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("Invalid session page.")
+        await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            rows = await PublicationRepository(session, organization_id).drafts(
+            rows = await PublicationRepository(session, group_id).drafts(
                 offset, limit, archive_cutoff(now or datetime.now(UTC))
             )
-            attendance = AttendanceRepository(session, organization_id)
+            attendance = AttendanceRepository(session, group_id)
             result: list[DraftDTO] = []
             for row, attempt in rows:
                 series = await attendance.series(row.series_id)
@@ -172,37 +170,24 @@ class PublicationService:
                 )
             return result
 
-    async def list_chats(self, organization_id: int, actor_id: int) -> list[ChatDTO]:
-        async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            rows = await ChatRepository(session, organization_id).all()
-            return [ChatDTO.model_validate(row) for row in rows]
-
     async def draft_state(
-        self, organization_id: int, actor_id: int, session_id: int, now: datetime | None = None
+        self, group_id: int, actor_id: int, session_id: int, now: datetime | None = None
     ) -> DraftDTO:
         """Return a Draft session. An expired lease becomes publish_unknown first."""
         now = now or datetime.now(UTC)
+        await self.access.require_admin(group_id, actor_id)
         async with write_session(self.session_factory) as session:
-            await self._authorize(organization_id, actor_id, session)
-            row = await self._require_draft(session, organization_id, session_id, now)
-            await self._expire(PublicationRepository(session, organization_id), row.id, now)
-            result = await self._draft(session, organization_id, row)
+            row = await self._require_draft(session, group_id, session_id, now)
+            await self._expire(PublicationRepository(session, group_id), row.id, now)
+            result = await self._draft(session, group_id, row)
         return result
 
-    async def review(
-        self, organization_id: int, actor_id: int, session_id: int, chat_id: int
-    ) -> PublicationReview:
+    async def review(self, group_id: int, actor_id: int, session_id: int) -> PublicationReview:
+        group = await self.access.require_admin(group_id, actor_id)
         async with self.session_factory() as session:
-            await self._authorize(organization_id, actor_id, session)
-            row = await self._require_draft(session, organization_id, session_id, datetime.now(UTC))
-            chat = await ChatRepository(session, organization_id).get(chat_id)
-            if chat is None:
-                raise NotFound(copy.PUBLISH_GROUP_NOT_FOUND)
-            draft = await self._draft(session, organization_id, row)
-            return PublicationReview(
-                draft=draft, chat=ChatDTO.model_validate(chat), text=self._text(draft)
-            )
+            row = await self._require_draft(session, group_id, session_id, datetime.now(UTC))
+            draft = await self._draft(session, group_id, row)
+            return PublicationReview(draft=draft, group=group, text=self._text(draft))
 
     def _text(self, draft: DraftDTO) -> str:
         return poll_text(
@@ -211,15 +196,14 @@ class PublicationService:
 
     async def publish(
         self,
-        organization_id: int,
+        group_id: int,
         actor_id: int,
         session_id: int,
-        chat_id: int,
         publisher: Publisher,
         now: datetime | None = None,
     ) -> PublishResult:
         now = now or datetime.now(UTC)
-        claimed = await self._claim(organization_id, actor_id, session_id, chat_id, now)
+        claimed = await self._claim(group_id, actor_id, session_id, now)
         if isinstance(claimed, PublishResult):
             return claimed
         attempt_id, telegram_chat_id, text = claimed
@@ -228,25 +212,25 @@ class PublicationService:
             message_id = await publisher.send_poll(telegram_chat_id, text, session_id)
         except PublishRejected as exc:
             log.warning("Poll publication rejected: %s", exc.failure)
-            return await self._record(organization_id, attempt_id, None, exc.failure)
+            return await self._record(group_id, attempt_id, None, exc.failure)
         except PublishUnknown:
             log.warning("Poll publication result unknown for session %s", session_id)
-            return await self._record(organization_id, attempt_id, None, None)
+            return await self._record(group_id, attempt_id, None, None)
         # Any other exception leaves the attempt publishing. Its lease expiry gives publish_unknown.
-        return await self._record(organization_id, attempt_id, message_id, None)
+        return await self._record(group_id, attempt_id, message_id, None)
 
     async def _claim(
-        self, organization_id: int, actor_id: int, session_id: int, chat_id: int, now: datetime
+        self, group_id: int, actor_id: int, session_id: int, now: datetime
     ) -> tuple[int, int, str] | PublishResult:
         """Transaction 1. Insert a publishing attempt, or report the active one."""
+        await self.access.require_admin(group_id, actor_id)
         try:
             async with write_session(self.session_factory) as session:
-                await self._authorize(organization_id, actor_id, session)
-                row = await self._require_draft(session, organization_id, session_id, now)
-                chat = await ChatRepository(session, organization_id).get(chat_id)
-                if chat is None:
+                row = await self._require_draft(session, group_id, session_id, now)
+                group = await GroupRepository(session).get(group_id)
+                if group is None or not group.active:
                     raise NotFound(copy.PUBLISH_GROUP_NOT_FOUND)
-                repository = PublicationRepository(session, organization_id)
+                repository = PublicationRepository(session, group_id)
                 await self._expire(repository, row.id, now)
                 active = await repository.active(row.id)
                 if active is not None:
@@ -254,27 +238,26 @@ class PublicationService:
                     return PublishResult(outcome=outcome, session_id=row.id)
                 attempt = await repository.add(
                     SessionPublication(
-                        organization_id=organization_id,
+                        group_id=group_id,
                         session_id=row.id,
-                        organization_chat_id=chat.id,
                         status=PublicationStatus.PUBLISHING.value,
                         requested_by=actor_id,
                         lease_expires_at=now + PUBLISH_LEASE,
                     )
                 )
-                text = self._text(await self._draft(session, organization_id, row))
-                claimed = (attempt.id, chat.telegram_chat_id, text)
+                text = self._text(await self._draft(session, group_id, row))
+                claimed = (attempt.id, group.telegram_chat_id, text)
         except IntegrityError:
             # Another request inserted the active attempt first. That request sends.
             return PublishResult(outcome=PublishOutcome.IN_PROGRESS, session_id=session_id)
         return claimed
 
     async def _record(
-        self, organization_id: int, attempt_id: int, message_id: int | None, failure: str | None
+        self, group_id: int, attempt_id: int, message_id: int | None, failure: str | None
     ) -> PublishResult:
         """Transaction 2. A message ID means success, a failure name means rejection."""
         async with write_session(self.session_factory) as session:
-            repository = PublicationRepository(session, organization_id)
+            repository = PublicationRepository(session, group_id)
             attempt = await repository.get(attempt_id)
             assert attempt is not None
             pending = attempt.status in (
@@ -283,7 +266,7 @@ class PublicationService:
             )
             if pending and message_id is not None:
                 # A late success after lease expiry still sets published.
-                await self._mark_published(session, organization_id, attempt, message_id)
+                await self._mark_published(session, group_id, attempt, message_id)
             elif pending and failure is not None:
                 attempt.status = PublicationStatus.FAILED.value
                 attempt.failure = failure
@@ -300,21 +283,21 @@ class PublicationService:
     async def _mark_published(
         self,
         session: AsyncSession,
-        organization_id: int,
+        group_id: int,
         attempt: SessionPublication,
         message_id: int | None,
     ) -> None:
         """Set published and open the session in the caller's transaction."""
         attempt.status = PublicationStatus.PUBLISHED.value
         attempt.telegram_message_id = message_id
-        row = await AttendanceRepository(session, organization_id).get_session(attempt.session_id)
+        row = await AttendanceRepository(session, group_id).get_session(attempt.session_id)
         assert row is not None
         if row.status == SessionStatus.DRAFT:
             row.status = SessionStatus.OPEN.value
 
     async def resolve(
         self,
-        organization_id: int,
+        group_id: int,
         actor_id: int,
         session_id: int,
         seen: bool,
@@ -322,9 +305,9 @@ class PublicationService:
     ) -> PublishResult:
         """An admin resolves publish_unknown. A repeat or a stale button changes nothing."""
         now = now or datetime.now(UTC)
+        await self.access.require_admin(group_id, actor_id)
         async with write_session(self.session_factory) as session:
-            await self._authorize(organization_id, actor_id, session)
-            repository = PublicationRepository(session, organization_id)
+            repository = PublicationRepository(session, group_id)
             await self._expire(repository, session_id, now)
             attempt = await repository.active(session_id)
             if attempt is None:
@@ -333,7 +316,7 @@ class PublicationService:
                 attempt.resolved_by = actor_id
                 if seen:
                     # No message ID: the bot cannot edit this poll later.
-                    await self._mark_published(session, organization_id, attempt, None)
+                    await self._mark_published(session, group_id, attempt, None)
                 else:
                     attempt.status = PublicationStatus.FAILED.value
                     attempt.failure = "not_seen"
@@ -345,16 +328,6 @@ class PublicationService:
             )
         return result
 
-    async def recover_expired(self, organization_id: int, now: datetime | None = None) -> int:
-        """Startup hook. A publishing attempt with an expired lease becomes publish_unknown."""
-        now = now or datetime.now(UTC)
-        async with write_session(self.session_factory) as session:
-            rows = await PublicationRepository(session, organization_id).expired(now)
-            for row in rows:
-                row.status = PublicationStatus.PUBLISH_UNKNOWN.value
-            await session.flush()
-        return len(rows)
-
 
 _OUTCOMES = {
     PublicationStatus.PUBLISHING: PublishOutcome.IN_PROGRESS,
@@ -362,3 +335,16 @@ _OUTCOMES = {
     PublicationStatus.PUBLISH_UNKNOWN: PublishOutcome.UNKNOWN,
     PublicationStatus.FAILED: PublishOutcome.FAILED,
 }
+
+
+async def recover_expired(
+    session_factory: async_sessionmaker[AsyncSession], now: datetime | None = None
+) -> int:
+    """Startup hook for every group. An expired publishing lease becomes publish_unknown."""
+    now = now or datetime.now(UTC)
+    async with write_session(session_factory) as session:
+        rows = await expired_attempts(session, now)
+        for row in rows:
+            row.status = PublicationStatus.PUBLISH_UNKNOWN.value
+        await session.flush()
+    return len(rows)

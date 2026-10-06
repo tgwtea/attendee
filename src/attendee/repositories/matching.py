@@ -10,19 +10,19 @@ class UnresolvedMatchRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def get(self, organization_id: int, telegram_user_id: int) -> UnresolvedMatch | None:
+    async def get(self, group_id: int, telegram_user_id: int) -> UnresolvedMatch | None:
         return await self.session.scalar(
             select(UnresolvedMatch).where(
-                UnresolvedMatch.organization_id == organization_id,
+                UnresolvedMatch.group_id == group_id,
                 UnresolvedMatch.telegram_user_id == telegram_user_id,
             )
         )
 
-    async def list_open(self, organization_id: int) -> list[UnresolvedMatch]:
+    async def list_open(self, group_id: int) -> list[UnresolvedMatch]:
         result = await self.session.scalars(
             select(UnresolvedMatch)
             .where(
-                UnresolvedMatch.organization_id == organization_id,
+                UnresolvedMatch.group_id == group_id,
                 UnresolvedMatch.resolved_at.is_(None),
             )
             .order_by(UnresolvedMatch.id)

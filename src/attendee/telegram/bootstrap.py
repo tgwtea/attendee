@@ -8,6 +8,7 @@ from telegram.ext import (
     Application,
     BaseHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     ExtBot,
@@ -17,7 +18,7 @@ from telegram.ext import (
 
 from attendee.telegram import onboarding, uploads
 from attendee.telegram.attendance import CALLBACK_PATTERN, AttendanceHandlers
-from attendee.telegram.chats import ChatHandlers
+from attendee.telegram.groups import GroupHandlers
 from attendee.telegram.publication import CALLBACK_PATTERN as PUBLISH_PATTERN
 from attendee.telegram.publication import PublicationHandlers
 from attendee.telegram.responses import CALLBACK_PATTERN as VOTE_PATTERN
@@ -37,12 +38,12 @@ def bot_handlers(
     members: onboarding.OnboardingHandlers,
     admins: uploads.UploadHandlers,
     attendance: AttendanceHandlers,
-    chats: ChatHandlers,
+    groups: GroupHandlers,
     publication: PublicationHandlers,
     responses: ResponseHandlers,
     stats: StatsHandlers,
 ) -> list[BotHandler]:
-    """Private chat handlers, group registration and upgrades, and group poll buttons.
+    """Private chat handlers, group joins and upgrades, and group poll buttons.
 
     Only the first matching handler runs. The reason handler comes before /attendance, but it
     matches only a reply to a known prompt, so other private text still reaches /attendance.
@@ -59,9 +60,10 @@ def bot_handlers(
         CommandHandler("start", members.start, filters=private),
         CallbackQueryHandler(members.answer, pattern=onboarding.CALLBACK_PATTERN),
         MessageHandler(filters.Document.ALL & private, admins.document),
+        CallbackQueryHandler(admins.pick_group, pattern=uploads.GROUP_PATTERN),
         CallbackQueryHandler(admins.button, pattern=uploads.CALLBACK_PATTERN),
-        CommandHandler("register", chats.register, filters=filters.ChatType.GROUPS),
-        MessageHandler(filters.StatusUpdate.MIGRATE, chats.migrate),
+        ChatMemberHandler(groups.member_update, ChatMemberHandler.MY_CHAT_MEMBER),
+        MessageHandler(filters.StatusUpdate.MIGRATE, groups.migrate),
         CommandHandler("publish", publication.start, filters=private),
         CallbackQueryHandler(publication.button, pattern=PUBLISH_PATTERN),
         CallbackQueryHandler(responses.tap, pattern=VOTE_PATTERN),

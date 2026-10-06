@@ -2,13 +2,12 @@ import io
 from unittest.mock import AsyncMock
 
 import pytest
+from conftest import add_group
 from openpyxl import load_workbook
 from sqlalchemy.exc import OperationalError
 from telegram_fakes import buttons, callback_update, message_update, replies
 from test_reports import ADMIN_TG, SARAH_TG, series  # noqa: F401  # series is a fixture
 
-from attendee.application.authorization import AuthorizationService
-from attendee.application.identity import IdentityService
 from attendee.application.reports import ReportService
 from attendee.main import create_handlers
 from attendee.telegram import messages
@@ -17,14 +16,14 @@ from attendee.telegram.stats import StatsHandlers, parse_callback
 
 
 @pytest.fixture
-def handlers(series, session_factory):  # noqa: F811
-    org = series[0]
-    return StatsHandlers(
-        org.id,
-        IdentityService(session_factory),
-        AuthorizationService(session_factory),
-        ReportService(session_factory),
-    )
+def handlers(series, session_factory, access):  # noqa: F811
+    return StatsHandlers(access, ReportService(session_factory, access))
+
+
+@pytest.fixture
+def g(series):  # noqa: F811
+    """The group ID that every stats button carries."""
+    return series[0].id
 
 
 async def tap(handlers, data, telegram_user_id=ADMIN_TG, chat_type="private"):
@@ -35,29 +34,31 @@ async def tap(handlers, data, telegram_user_id=ADMIN_TG, chat_type="private"):
 
 
 def test_parse_callback():
-    assert parse_callback("st:r:12") == ("r", 12)
-    assert parse_callback("st:q:12") is None
-    assert parse_callback("st:r:") is None
-    assert parse_callback("p:r:12") is None
+    assert parse_callback("st:r:3:12") == ("r", 3, 12)
+    assert parse_callback("st:r:12") is None
+    assert parse_callback("st:q:3:12") is None
+    assert parse_callback("st:r:3:") is None
+    assert parse_callback("p:r:3:12") is None
 
 
-async def test_stats_walks_series_session_and_lists(series, handlers):  # noqa: F811
+async def test_stats_walks_series_session_and_lists(series, handlers, g):  # noqa: F811
     _, _, first, second, _ = series
     update = message_update(ADMIN_TG, None)
     await handlers.start(update, None)
     [(text, markup)] = replies(update)
     assert text == messages.STATS_SELECT_SERIES
-    assert buttons(markup) == [("Patrons Day", f"st:r:{first.series_id}")]
+    assert buttons(markup) == [("Patrons Day", f"st:r:{g}:{first.series_id}")]
 
-    [(text, markup)] = replies(await tap(handlers, f"st:r:{first.series_id}"))
+    [(text, markup)] = replies(await tap(handlers, f"st:r:{g}:{first.series_id}"))
     assert text.startswith("Patrons Day")
     assert buttons(markup) == [
-        ("20 Oct · Open", f"st:s:{second.id}"),
-        ("13 Oct · Closed", f"st:s:{first.id}"),
-        ("Export Excel", f"st:x:{first.series_id}"),
+        ("20 Oct · Open", f"st:s:{g}:{second.id}"),
+        ("13 Oct · Closed", f"st:s:{g}:{first.id}"),
+        ("Export Excel", f"st:x:{g}:{first.series_id}"),
     ]
+    assert all(len(data.encode()) <= 64 for _, data in buttons(markup))
 
-    [(text, markup)] = replies(await tap(handlers, f"st:s:{first.id}"))
+    [(text, markup)] = replies(await tap(handlers, f"st:s:{g}:{first.id}"))
     assert text == (
         "Patrons Day — 13 Oct\nStatus: Closed\n\n"
         "Responded: 2 / 3\nNo response: 1\n\n"
@@ -69,17 +70,17 @@ async def test_stats_walks_series_session_and_lists(series, handlers):  # noqa: 
         "View Reasons",
     ]
 
-    [(text, _)] = replies(await tap(handlers, f"st:n:{first.id}"))
+    [(text, _)] = replies(await tap(handlers, f"st:n:{g}:{first.id}"))
     assert text == "No response — 13 Oct\n\n- Member"
-    [(text, _)] = replies(await tap(handlers, f"st:a:{first.id}"))
+    [(text, _)] = replies(await tap(handlers, f"st:a:{g}:{first.id}"))
     assert text == "Responses — 13 Oct\n\nComing (1)\n- Sarah\n\nLate (1)\n- Admin"
-    [(text, _)] = replies(await tap(handlers, f"st:w:{first.id}"))
+    [(text, _)] = replies(await tap(handlers, f"st:w:{g}:{first.id}"))
     assert text == "Reasons — 13 Oct\nOnly admins can see this.\n\n- Admin · Late: Traffic"
 
 
-async def test_export_sends_workbook_in_private_chat(series, handlers):  # noqa: F811
+async def test_export_sends_workbook_in_private_chat(series, handlers, g):  # noqa: F811
     first = series[2]
-    update = await tap(handlers, f"st:x:{first.series_id}")
+    update = await tap(handlers, f"st:x:{g}:{first.series_id}")
     call = update.effective_message.reply_document.await_args
     assert call.kwargs["filename"] == "Patrons Day.xlsx"
     assert "(Open)" in call.kwargs["caption"]
@@ -88,21 +89,58 @@ async def test_export_sends_workbook_in_private_chat(series, handlers):  # noqa:
     assert sheet["F1"].value == "13 Oct" and sheet["G1"].value == "20 Oct (Open)"
 
 
-async def test_member_and_stranger_are_denied(handlers):
+async def test_member_and_stranger_are_denied(handlers, g):
     for user in (SARAH_TG, 9999):
         update = message_update(user, None)
         await handlers.start(update, None)
         assert replies(update) == [(messages.STATS_DENIED, None)]
-        tapped = await tap(handlers, "st:w:1", telegram_user_id=user)
+        tapped = await tap(handlers, f"st:w:{g}:1", telegram_user_id=user)
         assert replies(tapped) == [(messages.STATS_DENIED, None)]
         tapped.effective_message.reply_document.assert_not_awaited()
+
+
+async def test_forged_group_in_button_is_denied(series, handlers, session_factory, admins):  # noqa: F811
+    """The group ID in a button is a claim. Each tap asks Telegram about that group."""
+    first = series[2]
+    other = await add_group(session_factory, -200, "Band")
+    admins.grant(other.telegram_chat_id, SARAH_TG)
+    # Sarah admins Band, not Samba: a Samba button with Samba's ID is denied.
+    samba = await tap(handlers, f"st:w:{series[0].id}:{first.id}", telegram_user_id=SARAH_TG)
+    assert replies(samba) == [(messages.STATS_DENIED, None)]
+    # With Band's ID, the Samba session is not in Band.
+    band = await tap(handlers, f"st:w:{other.id}:{first.id}", telegram_user_id=SARAH_TG)
+    assert replies(band) == [(messages.SESSION_NOT_FOUND, None)]
+
+
+async def test_admin_of_two_groups_picks_the_group(series, handlers, session_factory, admins):  # noqa: F811
+    other = await add_group(session_factory, -200, "Band")
+    admins.grant(other.telegram_chat_id, ADMIN_TG)
+    update = message_update(ADMIN_TG, None)
+    await handlers.start(update, None)
+    [(text, markup)] = replies(update)
+    assert text == messages.SELECT_GROUP
+    assert buttons(markup) == [
+        ("Band", f"st:p:{other.id}:0"),
+        ("Samba Group", f"st:p:{series[0].id}:0"),
+    ]
+    band = await tap(handlers, f"st:p:{other.id}:0")
+    assert replies(band) == [(messages.STATS_NO_SERIES, None)]
+
+
+async def test_failed_admin_check_reports(handlers, admins, g):
+    admins.fail = True
+    update = message_update(ADMIN_TG, None)
+    await handlers.start(update, None)
+    assert replies(update) == [(messages.ADMIN_CHECK_FAILED, None)]
+    tapped = await tap(handlers, f"st:w:{g}:1")
+    assert replies(tapped) == [(messages.ADMIN_CHECK_FAILED, None)]
 
 
 async def test_group_chat_and_bad_buttons(handlers):
     update = message_update(ADMIN_TG, None, chat_id=-100, chat_type="supergroup")
     await handlers.start(update, None)
     assert replies(update) == []
-    for data, chat_type in (("st:w:1", "supergroup"), ("st:zz", "private")):
+    for data, chat_type in (("st:w:1:1", "supergroup"), ("st:zz", "private")):
         tapped = await tap(handlers, data, chat_type=chat_type)
         tapped.callback_query.answer.assert_awaited_once_with(
             messages.STATS_EXPIRED, show_alert=True
@@ -110,14 +148,14 @@ async def test_group_chat_and_bad_buttons(handlers):
         assert replies(tapped) == []
 
 
-async def test_unknown_session_and_database_failure(handlers, monkeypatch):
-    assert replies(await tap(handlers, "st:s:999")) == [(messages.SESSION_NOT_FOUND, None)]
+async def test_unknown_session_and_database_failure(handlers, monkeypatch, g):
+    assert replies(await tap(handlers, f"st:s:{g}:999")) == [(messages.SESSION_NOT_FOUND, None)]
 
     async def broken(*_args, **_kwargs):
         raise OperationalError("SELECT", {}, Exception("locked"))
 
     monkeypatch.setattr(handlers.reports, "session_report", broken)
-    assert replies(await tap(handlers, "st:s:1")) == [(messages.STATS_DB_FAILED, None)]
+    assert replies(await tap(handlers, f"st:s:{g}:1")) == [(messages.STATS_DB_FAILED, None)]
 
 
 async def test_long_lists_split_and_keep_buttons_on_last_message(handlers, monkeypatch):
@@ -129,8 +167,8 @@ async def test_long_lists_split_and_keep_buttons_on_last_message(handlers, monke
     assert [markup for _, markup in sent] == [None, keyboard]
 
 
-async def test_stats_is_registered(series, session_factory):  # noqa: F811
-    application = build_application("123:abc", create_handlers(session_factory, series[0].id))
+async def test_stats_is_registered(series, session_factory, admins):  # noqa: F811
+    application = build_application("123:abc", create_handlers(session_factory, admins))
     commands = {
         command
         for group in application.handlers.values()

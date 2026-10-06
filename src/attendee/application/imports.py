@@ -1,8 +1,7 @@
-"""Confirmed namelist import into one organization: preview first, then apply.
+"""Confirmed namelist import into one group: preview first, then apply.
 
 The import matches a row to a member by Telegram user ID, then by canonical handle, in the
-target organization only. It never matches by name. It never removes, deactivates, or demotes
-a member, and it creates `member` memberships only.
+target group only. It never matches by name. It never removes or deactivates a member.
 """
 
 import logging
@@ -15,15 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee import copy
 from attendee.application.errors import ImportConflict, ImportRejected, NotFound
-from attendee.domain.identity import MembershipRole
 from attendee.domain.imports import ImportRow, ParsedFile
 from attendee.persistence.database import write_session
-from attendee.persistence.models import Membership, Person
-from attendee.repositories.identity import (
-    MembershipRepository,
-    OrganizationRepository,
-    PersonRepository,
-)
+from attendee.persistence.models import Person
+from attendee.repositories.groups import GroupRepository
+from attendee.repositories.identity import PersonRepository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,7 +38,6 @@ class MemberSnapshot:
     display_name: str | None
     telegram_handle: str | None
     telegram_user_id: int | None
-    role: MembershipRole
 
 
 @dataclass(frozen=True)
@@ -65,9 +59,9 @@ class DuplicateNameWarning:
 
 @dataclass(frozen=True)
 class ImportPreview:
-    """A full plan for one file and one organization state. Equal state gives an equal preview."""
+    """A full plan for one file and one group state. Equal state gives an equal preview."""
 
-    organization_id: int
+    group_id: int
     parsed: ParsedFile
     plans: tuple[RowPlan, ...]
     members: tuple[MemberSnapshot, ...]
@@ -114,30 +108,30 @@ class ImportService:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
-    async def preview(self, organization_id: int, parsed: ParsedFile) -> ImportPreview:
+    async def preview(self, group_id: int, parsed: ParsedFile) -> ImportPreview:
         """Plan the import. This writes nothing."""
         async with self.session_factory() as session:
-            return await _build_preview(session, organization_id, parsed)
+            return await _build_preview(session, group_id, parsed)
 
     async def apply(self, preview: ImportPreview) -> ImportResult:
         """Apply a confirmed preview in one short transaction, or apply nothing.
 
         Raise ImportRejected if the preview has a rejected row. Raise ImportConflict if the
-        organization state differs from the state that the preview read.
+        group state differs from the state that the preview read.
         """
         if preview.rejected:
             raise ImportRejected(f"{len(preview.rejected)} rejected rows")
         try:
             async with write_session(self.session_factory) as session:
-                current = await _build_preview(session, preview.organization_id, preview.parsed)
+                current = await _build_preview(session, preview.group_id, preview.parsed)
                 if current != preview:
-                    raise ImportConflict("The organization changed after the preview")
+                    raise ImportConflict("The group changed after the preview")
                 result = await _write(session, preview)
         except IntegrityError as exc:
-            raise ImportConflict("The organization changed after the preview") from exc
+            raise ImportConflict("The group changed after the preview") from exc
         LOGGER.info(
-            "Import into organization %d: created=%d updated=%d unchanged=%d",
-            preview.organization_id,
+            "Import into group %d: created=%d updated=%d unchanged=%d",
+            preview.group_id,
             result.created,
             result.updated,
             result.unchanged,
@@ -145,34 +139,17 @@ class ImportService:
         return result
 
 
-async def _build_preview(
-    session: AsyncSession, organization_id: int, parsed: ParsedFile
-) -> ImportPreview:
-    if await OrganizationRepository(session).get(organization_id) is None:
-        raise NotFound(f"Organization {organization_id}")
+async def _build_preview(session: AsyncSession, group_id: int, parsed: ParsedFile) -> ImportPreview:
+    if await GroupRepository(session).get(group_id) is None:
+        raise NotFound(f"Group {group_id}")
     members = tuple(
         MemberSnapshot(
-            person.id,
-            person.display_name,
-            person.telegram_handle,
-            person.telegram_user_id,
-            membership.role,
+            person.id, person.display_name, person.telegram_handle, person.telegram_user_id
         )
-        for membership, person in await MembershipRepository(session).list_members(organization_id)
+        for person in await PersonRepository(session, group_id).members()
     )
-    member_ids = {member.person_id for member in members}
-    file_telegram_ids = {
-        row.telegram_user_id for row in parsed.rows if row.telegram_user_id is not None
-    }
-    outside_ids = {
-        person.telegram_user_id
-        for person in await PersonRepository(session).list_by_telegram_user_ids(file_telegram_ids)
-        if person.id not in member_ids
-    }
-    plans = _reject_shared_targets([_plan_row(row, members, outside_ids) for row in parsed.rows])
-    return ImportPreview(
-        organization_id, parsed, plans, members, _duplicate_name_warnings(plans, members)
-    )
+    plans = _reject_shared_targets([_plan_row(row, members) for row in parsed.rows])
+    return ImportPreview(group_id, parsed, plans, members, _duplicate_name_warnings(plans, members))
 
 
 def _name_key(name: str | None) -> str:
@@ -195,9 +172,7 @@ def _duplicate_name_warnings(
     )
 
 
-def _plan_row(
-    row: ImportRow, members: tuple[MemberSnapshot, ...], outside_ids: set[int | None]
-) -> RowPlan:
+def _plan_row(row: ImportRow, members: tuple[MemberSnapshot, ...]) -> RowPlan:
     if row.errors:
         return RowPlan(row, RowAction.REJECT, reasons=row.errors)
 
@@ -210,8 +185,6 @@ def _plan_row(
             (member for member in members if member.telegram_user_id == row.telegram_user_id),
             None,
         )
-        if matched is None and row.telegram_user_id in outside_ids:
-            return reject(copy.ROW_ID_OUTSIDE)
     holders = [
         member
         for member in members
@@ -259,21 +232,14 @@ def _reject_shared_targets(plans: list[RowPlan]) -> tuple[RowPlan, ...]:
 
 
 async def _write(session: AsyncSession, preview: ImportPreview) -> ImportResult:
-    people = PersonRepository(session)
-    memberships = MembershipRepository(session)
+    people = PersonRepository(session, preview.group_id)
     for plan in preview.to_create:
-        person = await people.add(
+        await people.add(
             Person(
+                group_id=preview.group_id,
                 display_name=plan.row.name,
                 telegram_handle=plan.row.telegram_handle,
                 telegram_user_id=plan.row.telegram_user_id,
-            )
-        )
-        await memberships.add(
-            Membership(
-                organization_id=preview.organization_id,
-                person_id=person.id,
-                role=MembershipRole.MEMBER,
             )
         )
     for plan in preview.to_update:

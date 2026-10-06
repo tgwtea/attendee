@@ -26,11 +26,9 @@ from attendee.application.attendance import (
     SessionInput,
     SessionPreview,
 )
-from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import AccessDenied, ApplicationError
-from attendee.application.identity import IdentityService
+from attendee.application.groups import GroupAccess
 from attendee.domain.attendance import check_deadline, clean_name, parse_date, parse_deadline
-from attendee.domain.identity import MembershipRole
 from attendee.telegram import messages
 
 CALLBACK_PATTERN = r"^a:"
@@ -43,6 +41,7 @@ class Step(IntEnum):
     LABEL = 3
     DEADLINE = 4
     CONFIRM = 5
+    GROUP = 6
 
 
 @dataclass
@@ -51,6 +50,7 @@ class PendingSession:
     step: Step = Step.SERIES
     token: str | None = None
     message_id: int | None = None
+    group_id: int = 0
     series_id: int | None = None
     new_series_name: str | None = None
     session_date: date | None = None
@@ -58,6 +58,7 @@ class PendingSession:
     preview: SessionPreview | None = None
     offered_series: set[int] = field(default_factory=set[int])
     offered_pages: set[int] = field(default_factory=set[int])
+    offered_groups: set[int] = field(default_factory=set[int])
 
 
 def callback(token: str, action: str, value: int | None = None) -> str:
@@ -68,28 +69,19 @@ def callback(token: str, action: str, value: int | None = None) -> str:
 
 
 def parse_callback(data: str | None) -> tuple[str, str, int | None] | None:
-    match = re.fullmatch(r"a:([A-Za-z0-9_-]{16}):([snplyc])(?::([0-9]{1,19}))?", data or "")
+    match = re.fullmatch(r"a:([A-Za-z0-9_-]{16}):([gsnplyc])(?::([0-9]{1,19}))?", data or "")
     if match is None:
         return None
     action = match[2]
     value = None if match[3] is None else int(match[3])
-    if (action in ("s", "p")) != (value is not None):
+    if (action in ("g", "s", "p")) != (value is not None):
         return None
     return match[1], action, value
 
 
 class AttendanceHandlers:
-    def __init__(
-        self,
-        organization_id: int,
-        identity: IdentityService,
-        authorization: AuthorizationService,
-        attendance: AttendanceService,
-        timezone: str,
-    ) -> None:
-        self.organization_id = organization_id
-        self.identity = identity
-        self.authorization = authorization
+    def __init__(self, access: GroupAccess, attendance: AttendanceService, timezone: str) -> None:
+        self.access = access
         self.attendance = attendance
         self.timezone = timezone
         self.pending: dict[tuple[int, int], PendingSession] = {}
@@ -122,12 +114,10 @@ class AttendanceHandlers:
             return None
         return chat.id, user.id
 
-    async def _actor(self, user_id: int) -> int:
-        person = await self.identity.find_by_telegram_user_id(user_id)
-        if person is None:
-            raise AccessDenied(messages.SESSION_DENIED)
-        await self.authorization.require_role(self.organization_id, person.id, MembershipRole.ADMIN)
-        return person.id
+    async def _actor(self, pending: PendingSession, user_id: int) -> int:
+        """Ask Telegram again at each step. A demoted admin stops at once (decision T83)."""
+        await self.access.require_admin(pending.group_id, user_id)
+        return user_id
 
     async def _prompt(
         self,
@@ -155,7 +145,7 @@ class AttendanceHandlers:
     async def _series(
         self, update: Update, pending: PendingSession, actor: int, page: int = 0, notice: str = ""
     ) -> int:
-        series = await self.attendance.list_series(self.organization_id, actor, page * 10, 11)
+        series = await self.attendance.list_series(pending.group_id, actor, page * 10, 11)
         pending.offered_series = {row.id for row in series[:10]}
         buttons: list[tuple[str, str, int | None]] = [
             (row.name, "s", row.id) for row in series[:10]
@@ -178,13 +168,28 @@ class AttendanceHandlers:
             return ConversationHandler.END
         self.pending.pop(key, None)
         try:
-            actor = await self._actor(key[1])
+            groups = await self.access.admin_groups(key[1])
+            if not groups:
+                raise AccessDenied(messages.SESSION_DENIED)
             pending = PendingSession()
             self.pending[key] = pending
-            return await self._series(update, pending, actor)
+            if len(groups) > 1:
+                pending.offered_groups = {group.id for group in groups}
+                buttons: list[tuple[str, str, int | None]] = [
+                    (group.title, "g", group.id) for group in groups
+                ]
+                return await self._prompt(
+                    update, pending, Step.GROUP, messages.SELECT_GROUP, buttons
+                )
+            pending.group_id = groups[0].id
+            return await self._series(update, pending, await self._actor(pending, key[1]))
         except AccessDenied:
             self.pending.pop(key, None)
             await update.effective_message.reply_text(messages.SESSION_DENIED)
+            return ConversationHandler.END
+        except ApplicationError as exc:
+            self.pending.pop(key, None)
+            await update.effective_message.reply_text(str(exc))
             return ConversationHandler.END
         except SQLAlchemyError:
             return await self._database_failure(update, key)
@@ -218,7 +223,10 @@ class AttendanceHandlers:
             return ConversationHandler.END
         actor: int | None = None
         try:
-            actor = await self._actor(key[1])
+            if pending.step is Step.GROUP:
+                await message.reply_text(messages.SESSION_USE_BUTTON)
+                return None
+            actor = await self._actor(pending, key[1])
             value = message.text
             if pending.step is Step.NAME:
                 pending.new_series_name = clean_name(value)
@@ -280,7 +288,7 @@ class AttendanceHandlers:
         request: SessionInput,
         notice: str = "",
     ) -> int:
-        preview = await self.attendance.preview_session(self.organization_id, actor, request)
+        preview = await self.attendance.preview_session(pending.group_id, actor, request)
         pending.preview = preview
         local = request.deadline.astimezone(ZoneInfo(self.timezone))
         text = notice + messages.SESSION_SUMMARY.format(
@@ -314,6 +322,7 @@ class AttendanceHandlers:
         _, action, value = parsed
         valid = (
             action == "c"
+            or (pending.step is Step.GROUP and action == "g" and value in pending.offered_groups)
             or (
                 pending.step is Step.SERIES
                 and (
@@ -334,9 +343,14 @@ class AttendanceHandlers:
         assert key is not None
         actor: int | None = None
         try:
-            actor = await self._actor(key[1])
             if action == "c":
                 return await self.cancel(update, context)
+            if action == "g":
+                assert value is not None
+                pending.group_id = value
+            actor = await self._actor(pending, key[1])
+            if action == "g":
+                return await self._series(update, pending, actor)
             if action == "p":
                 assert value is not None
                 return await self._series(update, pending, actor, value)
@@ -355,7 +369,7 @@ class AttendanceHandlers:
             assert pending.preview is not None
             try:
                 result = await self.attendance.create_session(
-                    self.organization_id, actor, pending.preview
+                    pending.group_id, actor, pending.preview
                 )
             except RosterChanged:
                 return await self._summary(

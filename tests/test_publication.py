@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from conftest import add_group
 from sqlalchemy import select
 from telegram.error import (
     BadRequest,
@@ -16,22 +17,18 @@ from telegram.error import (
 )
 from telegram_fakes import buttons, callback_update, message_update, replies
 from test_attendance import add_member, create
-from test_chats import other_admin
 
-from attendee.application.authorization import AuthorizationService
-from attendee.application.chats import ChatRegistrationService
 from attendee.application.errors import AccessDenied, NotFound
-from attendee.application.identity import IdentityService
+from attendee.application.groups import GroupService
 from attendee.application.publication import (
     NotDraft,
     PublicationService,
     PublishOutcome,
     PublishRejected,
     PublishUnknown,
+    recover_expired,
 )
 from attendee.domain.attendance import SessionStatus
-from attendee.domain.chats import ChatType
-from attendee.domain.identity import MembershipRole
 from attendee.domain.publication import PUBLISH_LEASE, PublicationStatus, poll_text
 from attendee.persistence.models import AttendanceSession, SessionPublication
 from attendee.telegram import messages
@@ -68,20 +65,16 @@ class FakePublisher:
 
 
 @pytest.fixture
-def service(session_factory):
-    return PublicationService(session_factory, "Asia/Singapore")
+def service(session_factory, access):
+    return PublicationService(session_factory, access, "Asia/Singapore")
 
 
 @pytest.fixture
-async def ready(attendance_club, session_factory):
-    """A Draft session and one registered group of the organization."""
-    org, admin, _, _ = attendance_club
+async def ready(attendance_club):
+    """(group, admin Telegram user ID, Draft session). The poll goes to the session's group."""
+    group, admin, _, _ = attendance_club
     draft = await create(attendance_club)
-    registered = await ChatRegistrationService(session_factory).register(
-        org.id, admin.id, -100, ChatType.SUPERGROUP, "Samba", "creator"
-    )
-    assert registered.chat is not None
-    return org, admin, draft, registered.chat
+    return group, admin, draft
 
 
 async def attempts(factory):
@@ -125,9 +118,9 @@ def test_poll_text_follows_prd_and_has_no_counts():
 
 
 async def test_publish_opens_session(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     publisher = FakePublisher()
-    result = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
+    result = await service.publish(group.id, admin, draft.id, publisher, NOW)
     assert result.outcome is PublishOutcome.PUBLISHED
     assert [(sent[0], sent[2]) for sent in publisher.sent] == [(-100, draft.id)]
     assert "Your answer is private." in publisher.sent[0][1]
@@ -135,20 +128,18 @@ async def test_publish_opens_session(ready, service, session_factory):
     assert await session_status(session_factory, draft.id) == SessionStatus.OPEN
     # An Open session is no longer a Draft. Nothing sends again.
     with pytest.raises(NotDraft):
-        await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
+        await service.publish(group.id, admin, draft.id, publisher, NOW)
     assert len(publisher.sent) == 1
 
 
 async def test_concurrent_publish_sends_once(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     gate = asyncio.Event()
     publisher = FakePublisher(gate=gate)
-    first = asyncio.create_task(
-        service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
-    )
+    first = asyncio.create_task(service.publish(group.id, admin, draft.id, publisher, NOW))
     await publisher.started.wait()
     others = await asyncio.gather(
-        *(service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW) for _ in range(3))
+        *(service.publish(group.id, admin, draft.id, publisher, NOW) for _ in range(3))
     )
     gate.set()
     assert (await first).outcome is PublishOutcome.PUBLISHED
@@ -158,10 +149,10 @@ async def test_concurrent_publish_sends_once(ready, service, session_factory):
 
 
 async def test_simultaneous_claims_send_once(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     publisher = FakePublisher()
     results = await asyncio.gather(
-        *(service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW) for _ in range(4)),
+        *(service.publish(group.id, admin, draft.id, publisher, NOW) for _ in range(4)),
         return_exceptions=True,
     )
     # A later claim sees publishing (IN_PROGRESS) or the Open session (NotDraft). Neither sends.
@@ -177,13 +168,13 @@ async def test_simultaneous_claims_send_once(ready, service, session_factory):
 
 
 async def test_rejection_sets_failed_and_retry_publishes(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     rejected = await service.publish(
-        org.id, admin.id, draft.id, chat.id, FakePublisher(PublishRejected("Forbidden")), NOW
+        group.id, admin, draft.id, FakePublisher(PublishRejected("Forbidden")), NOW
     )
     assert rejected.outcome is PublishOutcome.FAILED and rejected.failure == "Forbidden"
     assert await session_status(session_factory, draft.id) == SessionStatus.DRAFT
-    retry = await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(), NOW)
+    retry = await service.publish(group.id, admin, draft.id, FakePublisher(), NOW)
     assert retry.outcome is PublishOutcome.PUBLISHED
     assert await attempts(session_factory) == [
         ("failed", None, "Forbidden"),
@@ -192,130 +183,136 @@ async def test_rejection_sets_failed_and_retry_publishes(ready, service, session
 
 
 async def test_timeout_then_seen_opens_without_message(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     publisher = FakePublisher(PublishUnknown())
-    result = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
+    result = await service.publish(group.id, admin, draft.id, publisher, NOW)
     assert result.outcome is PublishOutcome.UNKNOWN
     # An unknown result blocks a new send until an admin decides.
-    again = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
+    again = await service.publish(group.id, admin, draft.id, publisher, NOW)
     assert again.outcome is PublishOutcome.UNKNOWN and len(publisher.sent) == 1
-    seen = await service.resolve(org.id, admin.id, draft.id, seen=True, now=NOW)
+    seen = await service.resolve(group.id, admin, draft.id, seen=True, now=NOW)
     assert seen.outcome is PublishOutcome.PUBLISHED
     assert await attempts(session_factory) == [("published", None, None)]
     assert await session_status(session_factory, draft.id) == SessionStatus.OPEN
     # A repeated button changes nothing.
-    repeat = await service.resolve(org.id, admin.id, draft.id, seen=False, now=NOW)
+    repeat = await service.resolve(group.id, admin, draft.id, seen=False, now=NOW)
     assert repeat.outcome is PublishOutcome.PUBLISHED
 
 
 async def test_timeout_then_not_seen_allows_retry(ready, service, session_factory):
-    org, admin, draft, chat = ready
-    await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(PublishUnknown()), NOW)
-    not_seen = await service.resolve(org.id, admin.id, draft.id, seen=False, now=NOW)
+    group, admin, draft = ready
+    await service.publish(group.id, admin, draft.id, FakePublisher(PublishUnknown()), NOW)
+    not_seen = await service.resolve(group.id, admin, draft.id, seen=False, now=NOW)
     assert not_seen.outcome is PublishOutcome.FAILED
     assert await session_status(session_factory, draft.id) == SessionStatus.DRAFT
     with pytest.raises(NotFound):
-        await service.resolve(org.id, admin.id, draft.id, seen=True, now=NOW)
-    retry = await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(), NOW)
+        await service.resolve(group.id, admin, draft.id, seen=True, now=NOW)
+    retry = await service.publish(group.id, admin, draft.id, FakePublisher(), NOW)
     assert retry.outcome is PublishOutcome.PUBLISHED
 
 
 async def test_crash_lease_expires_at_restart(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     # A non-Telegram error stands in for a crash: the attempt stays publishing.
     with pytest.raises(RuntimeError):
-        await service.publish(
-            org.id, admin.id, draft.id, chat.id, FakePublisher(RuntimeError("crash")), NOW
-        )
+        await service.publish(group.id, admin, draft.id, FakePublisher(RuntimeError("crash")), NOW)
     assert await attempts(session_factory) == [("publishing", None, None)]
-    assert await service.recover_expired(org.id, NOW + PUBLISH_LEASE - timedelta(seconds=1)) == 0
-    assert await service.recover_expired(org.id, NOW + PUBLISH_LEASE) == 1
+    assert await recover_expired(session_factory, NOW + PUBLISH_LEASE - timedelta(seconds=1)) == 0
+    assert await recover_expired(session_factory, NOW + PUBLISH_LEASE) == 1
     assert await attempts(session_factory) == [("publish_unknown", None, None)]
-    assert await service.recover_expired(org.id, NOW + PUBLISH_LEASE) == 0
+    assert await recover_expired(session_factory, NOW + PUBLISH_LEASE) == 0
 
 
 async def test_crash_lease_expires_at_publish(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     with pytest.raises(RuntimeError):
-        await service.publish(
-            org.id, admin.id, draft.id, chat.id, FakePublisher(RuntimeError("crash")), NOW
-        )
+        await service.publish(group.id, admin, draft.id, FakePublisher(RuntimeError("crash")), NOW)
     publisher = FakePublisher()
-    within = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
+    within = await service.publish(group.id, admin, draft.id, publisher, NOW)
     assert within.outcome is PublishOutcome.IN_PROGRESS
     later = NOW + PUBLISH_LEASE
-    after = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, later)
+    after = await service.publish(group.id, admin, draft.id, publisher, later)
     assert after.outcome is PublishOutcome.UNKNOWN
     assert publisher.sent == []
-    state = await service.draft_state(org.id, admin.id, draft.id, later)
+    state = await service.draft_state(group.id, admin, draft.id, later)
     assert state.publication is PublicationStatus.PUBLISH_UNKNOWN
 
 
 async def test_late_success_still_publishes(ready, service, session_factory):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
 
     async def lease_expires_during_send():
-        await service.recover_expired(org.id, NOW + PUBLISH_LEASE)
+        await recover_expired(session_factory, NOW + PUBLISH_LEASE)
 
     publisher = FakePublisher(during=lease_expires_during_send)
-    result = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
+    result = await service.publish(group.id, admin, draft.id, publisher, NOW)
     assert result.outcome is PublishOutcome.PUBLISHED
     assert await attempts(session_factory) == [("published", 501, None)]
     assert await session_status(session_factory, draft.id) == SessionStatus.OPEN
 
 
-async def test_non_admin_cannot_publish_or_resolve(
-    ready, service, session_factory, attendance_club
-):
-    org, _, draft, chat = ready
-    member = attendance_club[2]
+async def test_non_admin_cannot_publish_or_resolve(ready, service, session_factory):
+    group, _, draft = ready
+    # A user who is not a Telegram admin of the group.
+    outsider = 5001
     publisher = FakePublisher()
     with pytest.raises(AccessDenied):
-        await service.publish(org.id, member.id, draft.id, chat.id, publisher, NOW)
+        await service.publish(group.id, outsider, draft.id, publisher, NOW)
     with pytest.raises(AccessDenied):
-        await service.resolve(org.id, member.id, draft.id, seen=True, now=NOW)
+        await service.resolve(group.id, outsider, draft.id, seen=True, now=NOW)
     with pytest.raises(AccessDenied):
-        await service.list_drafts(org.id, member.id)
+        await service.list_drafts(group.id, outsider)
     assert publisher.sent == [] and await attempts(session_factory) == []
 
 
-async def test_group_of_another_organization_is_not_found(ready, service, session_factory):
-    org, admin, draft, _ = ready
-    band, band_admin = await other_admin(session_factory)
-    other = await ChatRegistrationService(session_factory).register(
-        band.id, band_admin.id, -200, ChatType.GROUP, "Band", "creator"
-    )
-    assert other.chat is not None
+async def test_session_of_another_group_is_not_found(ready, service, session_factory, admins):
+    group, admin, draft = ready
+    band = await add_group(session_factory, -200, "Band")
+    admins.grant(band.telegram_chat_id, 2002)
     publisher = FakePublisher()
+    # A Band admin cannot publish or review a Samba session, even with its ID.
     with pytest.raises(NotFound):
-        await service.publish(org.id, admin.id, draft.id, other.chat.id, publisher, NOW)
+        await service.publish(band.id, 2002, draft.id, publisher, NOW)
     with pytest.raises(NotFound):
-        await service.review(org.id, admin.id, draft.id, other.chat.id)
+        await service.review(band.id, 2002, draft.id)
+    with pytest.raises(AccessDenied):
+        await service.publish(group.id, 2002, draft.id, publisher, NOW)
     assert publisher.sent == []
-    assert [chat.title for chat in await service.list_chats(org.id, admin.id)] == ["Samba"]
+    review = await service.review(group.id, admin, draft.id)
+    assert review.group.title == "Samba Group"
+
+
+async def test_poll_follows_a_group_upgrade(ready, service, session_factory):
+    group, admin, draft = ready
+    await GroupService(session_factory).migrate(group.telegram_chat_id, -1009)
+    publisher = FakePublisher()
+    # The fake admin check knows the old chat ID only, so grant the new one.
+    service.access.checker.grant(-1009, admin)
+    await service.publish(group.id, admin, draft.id, publisher, NOW)
+    assert [sent[0] for sent in publisher.sent] == [-1009]
 
 
 async def test_missing_session_is_not_found(ready, service):
-    org, admin, _, chat = ready
+    group, admin, _ = ready
     with pytest.raises(NotFound):
-        await service.publish(org.id, admin.id, 999, chat.id, FakePublisher(), NOW)
+        await service.publish(group.id, admin, 999, FakePublisher(), NOW)
 
 
 async def test_list_drafts_shows_attempt_state(ready, service, attendance_club):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     second = await create(attendance_club, new_series_name="Prac")
-    await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(PublishUnknown()), NOW)
-    drafts = {row.id: row.publication for row in await service.list_drafts(org.id, admin.id)}
+    await service.publish(group.id, admin, draft.id, FakePublisher(PublishUnknown()), NOW)
+    drafts = {row.id: row.publication for row in await service.list_drafts(group.id, admin)}
     assert drafts == {draft.id: PublicationStatus.PUBLISH_UNKNOWN, second.id: None}
 
 
 async def test_archived_draft_is_hidden_and_cannot_publish(ready, service, archive_after):
-    org, admin, draft, chat = ready
+    group, admin, draft = ready
     archived = draft.deadline + archive_after + timedelta(seconds=1)
-    assert [row.id for row in await service.list_drafts(org.id, admin.id, now=NOW)] == [draft.id]
-    assert await service.list_drafts(org.id, admin.id, now=archived) == []
+    assert [row.id for row in await service.list_drafts(group.id, admin, now=NOW)] == [draft.id]
+    assert await service.list_drafts(group.id, admin, now=archived) == []
     with pytest.raises(NotDraft, match="archived"):
-        await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(), archived)
+        await service.publish(group.id, admin, draft.id, FakePublisher(), archived)
 
 
 @pytest.mark.parametrize(
@@ -363,11 +360,8 @@ def test_callback_format():
 
 
 @pytest.fixture
-def flow(attendance_club, session_factory, service):
-    org = attendance_club[0]
-    return PublicationHandlers(
-        org.id, IdentityService(session_factory), AuthorizationService(session_factory), service
-    )
+def flow(attendance_club, access, service):
+    return PublicationHandlers(access, service)
 
 
 def bot_context(message_id=900, error=None):
@@ -385,17 +379,16 @@ async def press(flow, action, value=None, user_id=1001, context=None):
 
 
 async def test_handler_publishes_after_review(ready, flow, session_factory):
-    _, _, draft, chat = ready
+    _, _, draft = ready
     start = message_update(1001, None, text="/publish")
     await flow.start(start, bot_context())
     [(text, markup)] = replies(start)
     assert text == messages.PUBLISH_SELECT_SESSION
     assert buttons(markup)[0][0] == "Patrons Day · 2026-10-13"
-    selected = await press(flow, "s", draft.id)
-    assert buttons(replies(selected)[0][1])[0][0] == "Samba"
-    reviewed = await press(flow, "g", chat.id)
+    # One group: no group step. The review names the session's group.
+    reviewed = await press(flow, "s", draft.id)
     review_text = replies(reviewed)[0][0]
-    assert review_text.startswith("Group: Samba\n\nAttendance — Patrons Day")
+    assert review_text.startswith("Group: Samba Group\n\nAttendance — Patrons Day")
     context = bot_context()
     published = await press(flow, "y", context=context)
     assert replies(published) == [(messages.PUBLISH_DONE, None)]
@@ -405,10 +398,9 @@ async def test_handler_publishes_after_review(ready, flow, session_factory):
 
 
 async def test_handler_timeout_shows_resolution(ready, flow, session_factory):
-    _, _, draft, chat = ready
+    _, _, draft = ready
     await flow.start(message_update(1001, None, text="/publish"), bot_context())
     await press(flow, "s", draft.id)
-    await press(flow, "g", chat.id)
     unknown = await press(flow, "y", context=bot_context(error=TimedOut()))
     [(text, markup)] = replies(unknown)
     assert text == messages.PUBLISH_UNKNOWN
@@ -423,8 +415,8 @@ async def test_handler_timeout_shows_resolution(ready, flow, session_factory):
 
 
 async def test_handler_unknown_session_offers_resolution(ready, flow, service, session_factory):
-    org, admin, draft, chat = ready
-    await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(PublishUnknown()), NOW)
+    group, admin, draft = ready
+    await service.publish(group.id, admin, draft.id, FakePublisher(PublishUnknown()), NOW)
     start = message_update(1001, None, text="/publish")
     await flow.start(start, bot_context())
     assert buttons(replies(start)[0][1])[0][0].endswith("(check)")
@@ -436,16 +428,15 @@ async def test_handler_unknown_session_offers_resolution(ready, flow, service, s
 
 
 async def test_handler_rejection_message(ready, flow):
-    _, _, draft, chat = ready
+    _, _, draft = ready
     await flow.start(message_update(1001, None, text="/publish"), bot_context())
     await press(flow, "s", draft.id)
-    await press(flow, "g", chat.id)
     rejected = await press(flow, "y", context=bot_context(error=Forbidden("kicked")))
     assert replies(rejected) == [(messages.PUBLISH_FAILED.format(failure="Forbidden"), None)]
 
 
 async def test_handler_stale_and_repeated_buttons(ready, flow):
-    _, _, draft, _ = ready
+    _, _, draft = ready
     await flow.start(message_update(1001, None, text="/publish"), bot_context())
     pending = flow.pending[(1001, 1001)]
     token, message_id = pending.token, pending.message_id
@@ -462,7 +453,7 @@ async def test_handler_stale_and_repeated_buttons(ready, flow):
     forged.callback_query.answer.assert_awaited_once_with(messages.PUBLISH_EXPIRED, show_alert=True)
 
 
-async def test_handler_denies_non_admin(ready, flow, session_factory, attendance_club):
+async def test_handler_denies_non_admin(ready, flow, session_factory, attendance_club, admins):
     await add_member(session_factory, attendance_club[0].id, "Linked", telegram_id=3003)
     start = message_update(3003, None, text="/publish")
     await flow.start(start, bot_context())
@@ -471,16 +462,39 @@ async def test_handler_denies_non_admin(ready, flow, session_factory, attendance
     await flow.start(stranger, bot_context())
     assert replies(stranger) == [(messages.PUBLISH_DENIED, None)]
     assert flow.pending == {}
+    admins.fail = True
+    failed = message_update(1001, None, text="/publish")
+    await flow.start(failed, bot_context())
+    assert replies(failed) == [(messages.ADMIN_CHECK_FAILED, None)]
+    assert flow.pending == {}
 
 
-async def test_handler_needs_drafts_and_groups(attendance_club, flow, session_factory):
+async def test_handler_needs_drafts(attendance_club, flow):
     start = message_update(1001, None, text="/publish")
     await flow.start(start, bot_context())
     assert replies(start) == [(messages.PUBLISH_NO_DRAFTS, None)]
-    draft = await create(attendance_club)
+    assert flow.pending == {}
+
+
+async def test_handler_admin_of_two_groups_picks_the_group(ready, flow, session_factory, admins):
+    _, _, draft = ready
+    band = await add_group(session_factory, -200, "Band")
+    admins.grant(band.telegram_chat_id, 1001)
+    start = message_update(1001, None, text="/publish")
+    await flow.start(start, bot_context())
+    [(text, markup)] = replies(start)
+    assert text == messages.SELECT_GROUP
+    assert [label for label, _ in buttons(markup)] == ["Band", "Samba Group", messages.CANCEL]
+    # Band has no Draft session.
+    empty = await press(flow, "g", band.id)
+    assert replies(empty) == [(messages.PUBLISH_NO_DRAFTS, None)]
+    assert (1001, 1001) not in flow.pending
     await flow.start(message_update(1001, None, text="/publish"), bot_context())
-    selected = await press(flow, "s", draft.id)
-    assert replies(selected) == [(messages.PUBLISH_NO_GROUPS, None)]
+    samba = flow.pending[(1001, 1001)].offered_groups - {band.id}
+    sessions = await press(flow, "g", samba.pop())
+    assert buttons(replies(sessions)[0][1])[0][0] == "Patrons Day · 2026-10-13"
+    reviewed = await press(flow, "s", draft.id)
+    assert replies(reviewed)[0][0].startswith("Group: Samba Group")
 
 
 async def test_handler_pages_of_ten(attendance_club, flow, session_factory):
@@ -495,8 +509,8 @@ async def test_handler_pages_of_ten(attendance_club, flow, session_factory):
     assert len(labels) == 3 and labels[-2:] == [messages.PREVIOUS, messages.CANCEL]
 
 
-async def test_member_role_is_not_enough(ready, service, session_factory):
-    org, _, draft, chat = ready
-    member = await add_member(session_factory, org.id, "Viewer", MembershipRole.MEMBER)
+async def test_namelist_member_is_not_an_admin(ready, service, session_factory):
+    group, _, draft = ready
+    member = await add_member(session_factory, group.id, "Viewer", telegram_id=3003)
     with pytest.raises(AccessDenied):
-        await service.review(org.id, member.id, draft.id, chat.id)
+        await service.review(group.id, member.telegram_user_id, draft.id)

@@ -20,6 +20,16 @@ PREVIOUS = "Previous"
 NEXT = "Next"
 
 # ---------------------------------------------------------------------------
+# Group admins. A Telegram group admin is a bot admin for that group (decision T83).
+# ---------------------------------------------------------------------------
+ADMIN_DENIED = (
+    "Only a group admin can do this. Add me to your Telegram group, "
+    "and make sure you are an admin of that group."
+)
+ADMIN_CHECK_FAILED = "I couldn't check your admin role with Telegram. Please try again."
+SELECT_GROUP = "Which group is this for?"
+
+# ---------------------------------------------------------------------------
 # Onboarding: a member sends /start and links their Telegram account
 # ---------------------------------------------------------------------------
 # PRD §34 "User not found". Give no reason and no other member's data.
@@ -27,12 +37,14 @@ NOT_MATCHED = "Hmm, I couldn't find you on the attendance list. Please ask an ad
 CONFIRM_NAME = "Hi! Are you {name}?"
 ALREADY_LINKED = "You're already set up. Nothing else to do!"
 LINKED = "Thanks, you're all set! Your Telegram account is now linked to the attendance list."
-PROPOSAL_EXPIRED = "This question has expired. Send /start to try again."
+PROPOSAL_EXPIRED = "This question has expired. Tap a button on the group poll to try again."
+# A private /start does not say which group the member belongs to (decision T80).
+START_FROM_GROUP = "To link your account, tap a button on an attendance poll in your group."
 
 # ---------------------------------------------------------------------------
 # Namelist upload (admins)
 # ---------------------------------------------------------------------------
-UPLOAD_DENIED = "Only admins can upload a namelist."
+UPLOAD_DENIED = ADMIN_DENIED
 UPLOAD_WRONG_TYPE = "Please send the namelist as a .csv or .xlsx file."
 UPLOAD_TOO_LARGE = "That file is over {megabytes} MB. Please send a smaller one."
 UPLOAD_UNREADABLE = "I couldn't read that namelist: {error}"
@@ -84,7 +96,6 @@ ROW_BAD_TELEGRAM_ID = "{telegram_id!r} is not a valid Telegram ID"
 ROW_DUPLICATE = "the same {label} is in rows {rows}"
 ROW_DUPLICATE_HANDLE_LABEL = "handle"
 ROW_DUPLICATE_ID_LABEL = "Telegram ID"
-ROW_ID_OUTSIDE = "this Telegram ID belongs to someone outside this organization"
 ROW_HANDLE_TAKEN = "another member already has this handle"
 ROW_HANDLE_SHARED = "several members already have this handle"
 ROW_HANDLE_ID_MISMATCH = "the member with this handle has a different Telegram ID"
@@ -92,23 +103,9 @@ ROW_SAME_MEMBER = "rows {rows} all match the same member"
 HANDLE_RULE = "4 to 32 letters, digits, or underscores, starting with a letter"
 
 # ---------------------------------------------------------------------------
-# Group registration (/register in a group)
-# ---------------------------------------------------------------------------
-REGISTER_ANONYMOUS = (
-    "I can't see who sent this. "
-    'Please turn off "Remain anonymous" in your admin settings, then send /register again.'
-)
-REGISTER_DENIED = "Only an organization admin who is also an admin of this group can register it."
-REGISTER_CHECK_FAILED = "I couldn't check your role in this group. Please try again later."
-REGISTER_FAILED = "Registration didn't work. Send /register to try again."
-REGISTERED = "All set! This group will now receive attendance polls."
-REGISTER_REFRESHED = "This group is already registered for attendance polls."
-REGISTER_TAKEN = "Another organization has already registered this group."
-
-# ---------------------------------------------------------------------------
 # Session setup (/attendance, admins, private chat)
 # ---------------------------------------------------------------------------
-SESSION_DENIED = "Only admins can create attendance sessions."
+SESSION_DENIED = ADMIN_DENIED
 SESSION_BUTTON_EXPIRED = "This button has expired. Use the latest message or send /attendance."
 SESSION_FAILED = "Something went wrong. Send /attendance to try again."
 SESSION_CANCELLED = "Cancelled. Nothing was created."
@@ -128,7 +125,7 @@ SESSION_SUMMARY = (
     "Date: {date}\n"
     "Label: {label}\n"
     "Reply by: {deadline} ({timezone})\n"
-    "Members on the list: {members} (everyone, including admins)\n"
+    "Members on the list: {members} (everyone on the namelist)\n"
     "Status: Draft\n\n"
     "Save this Draft session?"
 )
@@ -155,12 +152,10 @@ DEADLINE_AFTER_SESSION = (
 # ---------------------------------------------------------------------------
 # Publishing a poll (/publish, admins)
 # ---------------------------------------------------------------------------
-PUBLISH_DENIED = "Only admins can publish attendance polls."
+PUBLISH_DENIED = ADMIN_DENIED
 PUBLISH_EXPIRED = "This button has expired. Send /publish again."
 PUBLISH_NO_DRAFTS = "There's no Draft session to publish. Create one with /attendance."
-PUBLISH_NO_GROUPS = "First register a group: add me to it and send /register there."
 PUBLISH_SELECT_SESSION = "Which Draft session do you want to publish?"
-PUBLISH_SELECT_GROUP = "Which group should get this poll?"
 PUBLISH_REVIEW = "Group: {group}\n\n{poll}\n\nPublish this poll?"
 PUBLISH_IN_PROGRESS = "This poll is still being published. Send /publish again in 2 minutes."
 PUBLISH_UNKNOWN = "I'm not sure the poll reached the group. Please check the group and tell me."
@@ -222,7 +217,7 @@ REASON_NOT_SAVED = "Sorry, that didn't save. Please send your reason again."
 # Attendance reports (/stats, admins only, private chat). These texts show other
 # members' responses, reasons, and counts, so they never go to a group or a member.
 # ---------------------------------------------------------------------------
-STATS_DENIED = "Only admins can see attendance reports."
+STATS_DENIED = ADMIN_DENIED
 STATS_EXPIRED = "This button doesn't work anymore. Send /stats again."
 STATS_DB_FAILED = "I couldn't load the report. Send /stats to try again."
 STATS_EXPORT_FAILED = "I couldn't make the file. Send /stats to try again."

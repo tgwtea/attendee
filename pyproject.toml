@@ -21,7 +21,6 @@ dependencies = [
 [project.scripts]
 attendee = "attendee.main:main"
 attendee-backup = "attendee.backup:main"
-attendee-setup = "attendee.setup:main"
 attendee-import = "attendee.importer:main"
 
 [dependency-groups]

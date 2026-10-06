@@ -1,7 +1,9 @@
-"""Member onboarding in a private chat: /start, then a name confirmation for a handle match.
+"""Member onboarding in a private chat: a name confirmation for a handle match.
 
 The handlers only translate between Telegram and AccountMatchingService (decision T34).
-Callback data carries the organization ID and the person ID, so no proposal is stored.
+Callback data carries the group ID and the person ID, so no proposal is stored. Both are claims:
+the service binds only the candidate that the user's own Telegram handle matches in that group.
+A private /start does not say which group the member belongs to (decision T80).
 """
 
 from dataclasses import dataclass
@@ -10,6 +12,7 @@ from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, 
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from attendee.application.errors import NotFound
 from attendee.application.matching import AccountMatchingService, MatchResult
 from attendee.domain.matching import MatchOutcome
 from attendee.telegram import messages
@@ -20,12 +23,12 @@ CALLBACK_PATTERN = r"^m:"
 @dataclass(frozen=True)
 class MatchAnswer:
     accept: bool
-    organization_id: int
+    group_id: int
     person_id: int
 
 
-def match_callback(accept: bool, organization_id: int, person_id: int) -> str:
-    return f"m:{'y' if accept else 'n'}:{organization_id}:{person_id}"
+def match_callback(accept: bool, group_id: int, person_id: int) -> str:
+    return f"m:{'y' if accept else 'n'}:{group_id}:{person_id}"
 
 
 def parse_match_callback(data: str | None) -> MatchAnswer | None:
@@ -39,7 +42,7 @@ def parse_match_callback(data: str | None) -> MatchAnswer | None:
     return MatchAnswer(parts[1] == "y", int(parts[2]), int(parts[3]))
 
 
-def render(result: MatchResult, organization_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
+def render(result: MatchResult, group_id: int) -> tuple[str, InlineKeyboardMarkup | None]:
     """Map a match result to a reply. Show the candidate name only (PRD §26)."""
     if result.outcome is MatchOutcome.BY_TELEGRAM_ID:
         return messages.ALREADY_LINKED, None
@@ -53,10 +56,10 @@ def render(result: MatchResult, organization_id: int) -> tuple[str, InlineKeyboa
             [
                 [
                     InlineKeyboardButton(
-                        messages.YES, callback_data=match_callback(True, organization_id, person.id)
+                        messages.YES, callback_data=match_callback(True, group_id, person.id)
                     ),
                     InlineKeyboardButton(
-                        messages.NO, callback_data=match_callback(False, organization_id, person.id)
+                        messages.NO, callback_data=match_callback(False, group_id, person.id)
                     ),
                 ]
             ]
@@ -66,18 +69,15 @@ def render(result: MatchResult, organization_id: int) -> tuple[str, InlineKeyboa
 
 
 class OnboardingHandlers:
-    def __init__(self, organization_id: int, matching: AccountMatchingService) -> None:
-        self.organization_id = organization_id
+    def __init__(self, matching: AccountMatchingService) -> None:
         self.matching = matching
 
     async def start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        """A private /start names no group. The member links from a group poll instead."""
         message = update.effective_message
-        user = update.effective_user
-        if message is None or user is None:
+        if message is None:
             return
-        result = await self.matching.match(self.organization_id, user.id, user.username)
-        text, keyboard = render(result, self.organization_id)
-        await message.reply_text(text, reply_markup=keyboard)
+        await message.reply_text(messages.START_FROM_GROUP)
 
     async def answer(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -85,17 +85,21 @@ class OnboardingHandlers:
             return
         await query.answer()
         answer = parse_match_callback(query.data)
-        if answer is None or answer.organization_id != self.organization_id:
+        if answer is None:
             await edit_text(query, messages.PROPOSAL_EXPIRED, None)
             return
         user = query.from_user
-        if answer.accept:
-            result = await self.matching.confirm(
-                self.organization_id, user.id, user.username, answer.person_id
-            )
-        else:
-            result = await self.matching.reject(self.organization_id, user.id, user.username)
-        text, keyboard = render(result, self.organization_id)
+        try:
+            if answer.accept:
+                result = await self.matching.confirm(
+                    answer.group_id, user.id, user.username, answer.person_id
+                )
+            else:
+                result = await self.matching.reject(answer.group_id, user.id, user.username)
+        except NotFound:
+            await edit_text(query, messages.PROPOSAL_EXPIRED, None)
+            return
+        text, keyboard = render(result, answer.group_id)
         await edit_text(query, text, keyboard)
 
 

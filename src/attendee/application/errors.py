@@ -13,11 +13,11 @@ class AccessDenied(ApplicationError):
     pass
 
 
+class AdminCheckFailed(ApplicationError):
+    """Telegram gave no answer to a group-admin check. The action did not run."""
+
+
 class DuplicateTelegramUserId(ApplicationError):
-    pass
-
-
-class DuplicateMembership(ApplicationError):
     pass
 
 
@@ -26,4 +26,4 @@ class ImportRejected(ApplicationError):
 
 
 class ImportConflict(ApplicationError):
-    """The organization changed after the preview, so the import applies no row."""
+    """The group changed after the preview, so the import applies no row."""

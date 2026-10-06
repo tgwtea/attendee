@@ -148,6 +148,8 @@ A regular member **cannot** see:
 
 Admins are defined through a configurable admin list.
 
+**Change (2026-10-07):** The configurable admin list is the Telegram group's own admin list. A `creator` or `administrator` of a Telegram group that has the bot is a bot admin for that group only. The bot stores no admin list. A group admin adds or removes a bot admin by changing Telegram admin rights; "manage the list of authorised admins" happens in Telegram. Every admin of a group sees all private reasons of that group. The bot serves many unrelated groups, and each group owns its own namelist, series, sessions, and responses. Decisions T80–T87.
+
 An admin can:
 
 - create attendance polls;
@@ -736,6 +738,8 @@ The bot should maintain a configurable list of authorised Telegram accounts.
 
 Admins may be added or removed without changing the source code.
 
+**Change (2026-10-07):** Telegram group admin rights are the list (§6.2). The bot checks them with Telegram before each admin action.
+
 MVP can use a single admin permission level.
 
 All admins can:
@@ -1265,7 +1269,7 @@ Once the core workflow is stable, useful additions would be:
 - section-level attendance statistics;
 - recurring practice templates;
 - duplicate session detection;
-- multiple Telegram groups;
+- multiple Telegram groups (done: each group is separate, §6.2, 2026-10-07);
 - saved attendance filters;
 - admin audit log;
 - optional web dashboard;

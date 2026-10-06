@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from conftest import add_group
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from telegram import Chat, ForceReply, Message, MessageEntity, User
@@ -10,7 +11,7 @@ from telegram import Update as TelegramUpdate
 from telegram_fakes import callback_update, message_update, replies
 from test_attendance import add_member, create
 
-from attendee.application.organizations import OrganizationService
+from attendee.application.groups import GroupService
 from attendee.application.responses import (
     NotLinked,
     NotOnRoster,
@@ -125,8 +126,11 @@ async def test_checks_link_roster_and_open_status(attendance_club, open_session,
     await add_member(session_factory, org.id, "Late Joiner", telegram_id=3003)
     with pytest.raises(NotOnRoster):
         await service.record(org.id, 3003, draft.id, ResponseStatus.COMING)
-    # Another organization cannot reach this session.
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
+    # Another group cannot reach this session.
+    other = await add_group(session_factory, -200, "Other")
+    with pytest.raises(NotLinked):
+        await service.check(other.id, MEMBER_TG, draft.id)
+    await add_member(session_factory, other.id, "Sarah", telegram_id=MEMBER_TG)
     with pytest.raises(SessionNotOpen):
         await service.check(other.id, MEMBER_TG, draft.id)
     with pytest.raises(SessionNotOpen):
@@ -177,8 +181,7 @@ def group_tap(session_id, code, telegram_user_id=MEMBER_TG):
 
 @pytest.fixture
 def handlers(open_session, session_factory):
-    org, _ = open_session
-    return ResponseHandlers(org.id, ResponseService(session_factory))
+    return ResponseHandlers(GroupService(session_factory), ResponseService(session_factory))
 
 
 async def test_coming_tap_records_with_private_popup(handlers, open_session, session_factory):
@@ -194,11 +197,11 @@ async def test_coming_tap_records_with_private_popup(handlers, open_session, ses
 
 
 async def test_late_flow_from_tap_to_reason(handlers, open_session, session_factory):
-    _, draft = open_session
+    group, draft = open_session
     tap = group_tap(draft.id, "l")
     await handlers.tap(tap, bot_context())
     tap.callback_query.answer.assert_awaited_once_with(url="https://t.me/attendee_bot?start=reason")
-    assert handlers.pending == {MEMBER_TG: PendingReason(draft.id, ResponseStatus.LATE)}
+    assert handlers.pending == {MEMBER_TG: PendingReason(group.id, draft.id, ResponseStatus.LATE)}
     # Nothing is saved before the reason arrives (PRD §23 clarification).
     assert await current(session_factory) == []
     start = message_update(MEMBER_TG, "sarah", text="/start reason")
@@ -224,14 +227,14 @@ class FakeClock:
 
 @pytest.fixture
 def clocked(open_session, session_factory):
-    org, _ = open_session
     clock = FakeClock()
-    return ResponseHandlers(org.id, ResponseService(session_factory), clock), clock
+    groups = GroupService(session_factory)
+    return ResponseHandlers(groups, ResponseService(session_factory), clock), clock
 
 
 async def test_change_needs_second_tap(clocked, open_session, session_factory):
     handlers, clock = clocked
-    _, draft = open_session
+    group, draft = open_session
     await handlers.tap(group_tap(draft.id, "c"), bot_context())
     first = group_tap(draft.id, "l")
     await handlers.tap(first, bot_context())
@@ -248,7 +251,7 @@ async def test_change_needs_second_tap(clocked, open_session, session_factory):
     second.callback_query.answer.assert_awaited_once_with(
         url="https://t.me/attendee_bot?start=reason"
     )
-    assert handlers.pending == {MEMBER_TG: PendingReason(draft.id, ResponseStatus.LATE)}
+    assert handlers.pending == {MEMBER_TG: PendingReason(group.id, draft.id, ResponseStatus.LATE)}
     assert handlers.armed == {}
 
 
@@ -365,6 +368,23 @@ async def test_tap_rejections_use_popups(handlers, open_session, session_factory
     assert handlers.pending == {}
 
 
+async def test_tap_counts_only_in_the_group_of_the_poll(handlers, open_session, session_factory):
+    """The group comes from the poll message's chat, which Telegram fills (decision T80)."""
+    group, draft = open_session
+    other = await add_group(session_factory, -200, "Other")
+    await add_member(session_factory, other.id, "Sarah", telegram_id=MEMBER_TG)
+    for chat_id in (-200, -999):
+        tap = callback_update(
+            MEMBER_TG, "sarah", f"v:{draft.id}:c", chat_id=chat_id, chat_type="supergroup"
+        )
+        await handlers.tap(tap, bot_context())
+        tap.callback_query.answer.assert_awaited_once_with(messages.POLL_CLOSED, show_alert=True)
+    assert await current(session_factory) == []
+    late = group_tap(draft.id, "l")
+    await handlers.tap(late, bot_context())
+    assert handlers.pending[MEMBER_TG].group_id == group.id
+
+
 def private_text(text, user_id=MEMBER_TG, reply_to_message=None):
     entities = (
         [MessageEntity(MessageEntity.BOT_COMMAND, 0, len(text.split()[0]))]
@@ -393,12 +413,12 @@ def first_handler(application, update):
 
 def test_routing_sends_text_to_reason_only_with_pending_tap():
     """Only the first matching handler runs, so handler order decides the route."""
-    application = build_application("123:ABC", create_handlers(Mock(), 1))
+    application = build_application("123:ABC", create_handlers(Mock(), Mock()))
     reason_handler = application.handlers[0][0]
     responses = reason_handler.callback.__self__
     # Without a pending tap, stray private text matches no handler.
     assert first_handler(application, private_text("Overseas")) is None
-    responses.pending[MEMBER_TG] = PendingReason(1, ResponseStatus.LATE)
+    responses.pending[MEMBER_TG] = PendingReason(1, 1, ResponseStatus.LATE)
     assert first_handler(application, private_text("Overseas")) is None
     prompt = private_text("Please reply").message
     responses.prompts[MEMBER_TG, prompt.message_id] = responses.pending[MEMBER_TG]

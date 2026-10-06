@@ -5,6 +5,7 @@ A tap that changes a saved status asks for a second tap first (decision T68).
 A response takes up to three updates: the tap, "/start reason", and the reason text.
 The private prompt links the reason reply to its original pending tap (decision T78).
 The state lives in process memory, so a restart loses it and the member taps again.
+The group of a tap is the chat of the poll message, which Telegram fills (decision T80).
 """
 
 import logging
@@ -17,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from telegram import ForceReply, Message, Update
 from telegram.ext import ContextTypes, filters
 
+from attendee.application.groups import GroupService
 from attendee.application.responses import (
     NotLinked,
     NotOnRoster,
@@ -34,6 +36,7 @@ START_PATTERN = rf"^/start {START_PAYLOAD}$"
 
 @dataclass(frozen=True)
 class PendingReason:
+    group_id: int
     session_id: int
     status: ResponseStatus
 
@@ -83,11 +86,11 @@ def _session_name(target: ResponseTarget) -> str:
 class ResponseHandlers:
     def __init__(
         self,
-        organization_id: int,
+        groups: GroupService,
         responses: ResponseService,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.organization_id = organization_id
+        self.groups = groups
         self.responses = responses
         self.clock = clock
         self.pending: dict[int, PendingReason] = {}
@@ -139,7 +142,14 @@ class ResponseHandlers:
         session_id, status = vote
         user_id = query.from_user.id
         try:
-            target = await self.responses.check(self.organization_id, user_id, session_id)
+            group = (
+                None
+                if query.message is None
+                else await self.groups.by_telegram_id(query.message.chat.id)
+            )
+            if group is None:
+                raise SessionNotOpen
+            target = await self.responses.check(group.id, user_id, session_id)
             if self._needs_confirmation(
                 user_id, session_id, status, target.current_status, query.id
             ):
@@ -155,7 +165,7 @@ class ResponseHandlers:
                 return
             if status is ResponseStatus.COMING:
                 # A Coming tap replaces any pending non-Coming tap.
-                await self.responses.record(self.organization_id, user_id, session_id, status)
+                await self.responses.record(group.id, user_id, session_id, status)
                 self.pending.pop(user_id, None)
                 self._clear_prompts(user_id)
                 await query.answer(messages.RECORDED.format(status=status.label), show_alert=True)
@@ -168,7 +178,7 @@ class ResponseHandlers:
             await query.answer(messages.TAP_NOT_SAVED, show_alert=True)
             return
         # A new tap replaces the pending one. Nothing is in the database yet.
-        self.pending[user_id] = PendingReason(session_id, status)
+        self.pending[user_id] = PendingReason(group.id, session_id, status)
         await query.answer(url=f"https://t.me/{context.bot.username}?start={START_PAYLOAD}")
 
     async def start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -181,7 +191,7 @@ class ResponseHandlers:
             await message.reply_text(messages.NO_PENDING_REASON)
             return
         try:
-            target = await self.responses.check(self.organization_id, user.id, pending.session_id)
+            target = await self.responses.check(pending.group_id, user.id, pending.session_id)
         except (NotLinked, NotOnRoster, SessionNotOpen) as exc:
             self._drop(user.id, pending)
             await message.reply_text(_denied_text(exc))
@@ -211,7 +221,7 @@ class ResponseHandlers:
             return
         try:
             result = await self.responses.record(
-                self.organization_id, user.id, pending.session_id, pending.status, message.text
+                pending.group_id, user.id, pending.session_id, pending.status, message.text
             )
         except ReasonMissing:
             await self._prompt(message, user.id, pending, messages.REASON_MISSING)

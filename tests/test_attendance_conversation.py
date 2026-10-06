@@ -3,7 +3,8 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select, update
+from conftest import add_group
+from sqlalchemy import func, select
 from telegram import Update
 from telegram.error import NetworkError
 from telegram.ext import Application, ConversationHandler
@@ -11,32 +12,30 @@ from telegram.request import BaseRequest
 from telegram_fakes import buttons, callback_update, context, message_update, replies
 from test_attendance import add_member
 
-from attendee.application.authorization import AuthorizationService
-from attendee.application.identity import IdentityService
-from attendee.domain.identity import MembershipRole
 from attendee.main import create_handlers
-from attendee.persistence.models import AttendanceSeries, AttendanceSession, Membership
+from attendee.persistence.models import AttendanceSeries, AttendanceSession
 from attendee.telegram.attendance import (
     AttendanceHandlers,
     Step,
     callback,
     parse_callback,
 )
-from attendee.telegram.messages import ALREADY_LINKED, DATE_FORMAT, DEADLINE_FORMAT, SESSION_FAILED
+from attendee.telegram.messages import (
+    ADMIN_CHECK_FAILED,
+    DATE_FORMAT,
+    DEADLINE_FORMAT,
+    SELECT_GROUP,
+    SESSION_FAILED,
+    START_FROM_GROUP,
+)
 from attendee.telegram.messages import SESSION_BUTTON_EXPIRED as EXPIRED
 from attendee.telegram.messages import SESSION_DENIED as DENIED
 
 
 @pytest.fixture
-async def flow(attendance_club, session_factory):
-    org, admin, member, service = attendance_club
-    return AttendanceHandlers(
-        org.id,
-        IdentityService(session_factory),
-        AuthorizationService(session_factory),
-        service,
-        "Asia/Singapore",
-    )
+async def flow(attendance_club, access):
+    _, _, _, service = attendance_club
+    return AttendanceHandlers(access, service, "Asia/Singapore")
 
 
 async def start(flow, user_id=1001):
@@ -93,7 +92,7 @@ async def test_each_step_then_save_and_select_existing(flow, session_factory):
     message = await summary(flow, label="Tech Check")
     [(body, markup)] = replies(message)
     assert "Tech Check" in body and "2026-10-13" in body and "Asia/Singapore" in body
-    assert "Members on the list: 2" in body and "Status: Draft" in body
+    assert "Members on the list: 1" in body and "Status: Draft" in body
     assert all(len(data.encode()) <= 64 for _, data in buttons(markup))
     assert await counts(session_factory) == (0, 0)
     state, message = await press(flow, "y")
@@ -187,34 +186,62 @@ async def test_wrong_actor_chat_message_action_and_malformed_callback(flow, sess
     assert (await press(flow, "y"))[0] == ConversationHandler.END
 
 
-async def test_non_admin_other_org_and_role_loss(flow, attendance_club, session_factory):
-    from attendee.application.organizations import OrganizationService
-
-    org, _, _, _ = attendance_club
-    await add_member(session_factory, org.id, "Member two", telegram_id=2002)
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
-    await add_member(session_factory, other.id, "Other admin", MembershipRole.ADMIN, 3003)
-    for user_id in (2002, 3003, 4004):
+async def test_non_admin_other_group_and_role_loss(flow, attendance_club, session_factory, admins):
+    group, _, _, _ = attendance_club
+    await add_member(session_factory, group.id, "Member two", telegram_id=2002)
+    other = await add_group(session_factory, -200, "Other")
+    admins.grant(other.telegram_chat_id, 3003)
+    for user_id in (2002, 4004):
         state, message = await start(flow, user_id)
         assert state == ConversationHandler.END and replies(message)[0][0] == DENIED
+    # An admin of another group gets that group's series, never this group's.
+    state, _ = await start(flow, 3003)
+    assert state == Step.SERIES and flow.pending[(3003, 3003)].group_id == other.id
     await summary(flow)
-    async with session_factory.begin() as session:
-        await session.execute(
-            update(Membership).where(Membership.organization_id == org.id).values(role="member")
-        )
+    # Telegram demotes the admin before Confirm: the step stops (decision T83).
+    admins.revoke(group.telegram_chat_id, 1001)
     state, message = await press(flow, "y")
     assert state == ConversationHandler.END and replies(message)[0][0] == DENIED
     assert await counts(session_factory) == (0, 0)
 
 
+async def test_admin_of_two_groups_picks_the_group(flow, attendance_club, session_factory, admins):
+    group, admin, _, service = attendance_club
+    other = await add_group(session_factory, -200, "Band")
+    admins.grant(other.telegram_chat_id, admin)
+    await service.create_series(other.id, admin, "Band Series")
+    state, message = await start(flow)
+    assert state == Step.GROUP
+    [(body, markup)] = replies(message)
+    assert body == SELECT_GROUP
+    assert [label for label, _ in buttons(markup)] == ["Band", "Samba Group", "Cancel"]
+    # A group that the bot did not offer is refused.
+    _, wrong = await press(flow, "g", 999)
+    wrong.callback_query.answer.assert_awaited_once_with(EXPIRED, show_alert=True)
+    state, message = await text(flow, "Band")
+    assert state is None
+    state, message = await press(flow, "g", other.id)
+    assert state == Step.SERIES
+    assert "Band Series" in [label for label, _ in buttons(replies(message)[0][1])]
+    assert flow.pending[(1001, 1001)].group_id == other.id
+
+
+async def test_failed_admin_check_ends_the_flow(flow, admins):
+    admins.fail = True
+    state, message = await start(flow)
+    assert state == ConversationHandler.END
+    assert replies(message)[0][0] == ADMIN_CHECK_FAILED
+    assert not flow.pending
+
+
 async def test_roster_change_and_duplicate_series_race(flow, attendance_club, session_factory):
-    org, admin, _, service = attendance_club
+    group, admin, _, service = attendance_club
     await summary(flow)
-    await add_member(session_factory, org.id, "New member")
+    await add_member(session_factory, group.id, "New member")
     state, message = await press(flow, "y")
-    assert state == Step.CONFIRM and "Members on the list: 3" in replies(message)[0][0]
+    assert state == Step.CONFIRM and "Members on the list: 2" in replies(message)[0][0]
     assert await counts(session_factory) == (0, 0)
-    await service.create_series(org.id, admin.id, "Patrons Day")
+    await service.create_series(group.id, admin, "Patrons Day")
     state, message = await press(flow, "y")
     assert state == Step.SERIES and "already exists" in replies(message)[0][0]
     assert await counts(session_factory) == (1, 0)
@@ -234,9 +261,9 @@ async def test_telegram_failure_keeps_committed_session(flow, session_factory):
 
 
 async def test_series_pages(flow, attendance_club):
-    org, admin, _, service = attendance_club
+    group, admin, _, service = attendance_club
     for index in range(12):
-        await service.create_series(org.id, admin.id, f"Series {index:02}")
+        await service.create_series(group.id, admin, f"Series {index:02}")
     _, message = await start(flow)
     assert len(flow.pending[(1001, 1001)].offered_series) == 10
     assert "Next" in [label for label, _ in buttons(replies(message)[0][1])]
@@ -248,7 +275,15 @@ async def test_series_pages(flow, attendance_club):
 def test_callback_shape():
     token = "a" * 16
     assert parse_callback(callback(token, "s", 12)) == (token, "s", 12)
-    for value in (None, "a:x:y", f"a:{token}:y:1", f"a:{token}:s", f"a:{token}:p:-1"):
+    assert parse_callback(callback(token, "g", 3)) == (token, "g", 3)
+    for value in (
+        None,
+        "a:x:y",
+        f"a:{token}:y:1",
+        f"a:{token}:s",
+        f"a:{token}:g",
+        f"a:{token}:p:-1",
+    ):
         assert parse_callback(value) is None
 
 
@@ -294,8 +329,7 @@ class FakeTelegram(BaseRequest):
         return 200, json.dumps({"ok": True, "result": result}).encode()
 
 
-async def test_real_conversation_dispatch(session_factory, attendance_club):
-    org, _, _, _ = attendance_club
+async def test_real_conversation_dispatch(session_factory, attendance_club, admins):
     transport = FakeTelegram()
     app = (
         Application.builder()
@@ -306,7 +340,7 @@ async def test_real_conversation_dispatch(session_factory, attendance_club):
         .job_queue(None)
         .build()
     )
-    for handler in create_handlers(session_factory, org.id):
+    for handler in create_handlers(session_factory, admins):
         app.add_handler(handler)
     errors = []
 
@@ -370,9 +404,9 @@ async def test_real_conversation_dispatch(session_factory, attendance_club):
         await send("/attendance")
         await send("/cancel")
         assert "Cancelled" in transport.sent[-1]["text"]
-        # Existing onboarding remains reachable after a conversation ends.
+        # The private /start remains reachable after a conversation ends.
         await send("/start")
-        assert transport.sent[-1]["text"] == ALREADY_LINKED
+        assert transport.sent[-1]["text"] == START_FROM_GROUP
     assert errors == []
     assert await counts(session_factory) == (1, 1)
 

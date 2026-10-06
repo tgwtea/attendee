@@ -1,6 +1,7 @@
 """Private admin /publish flow and the Telegram publisher. Publication rules stay in the service.
 
 Buttons use p:<token>:<action>[:<id>]. Each token binds the admin, chat, message, and step (T45).
+The admin picks the group first when they admin more than one (decision T85).
 """
 
 import logging
@@ -14,9 +15,8 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, NetworkError, TelegramError
 from telegram.ext import ContextTypes
 
-from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import AccessDenied, ApplicationError
-from attendee.application.identity import IdentityService
+from attendee.application.groups import GroupAccess
 from attendee.application.publication import (
     DraftDTO,
     PublicationService,
@@ -25,7 +25,6 @@ from attendee.application.publication import (
     PublishResult,
     PublishUnknown,
 )
-from attendee.domain.identity import MembershipRole
 from attendee.domain.publication import PublicationStatus
 from attendee.telegram import messages
 
@@ -65,8 +64,8 @@ class TelegramPublisher:
 
 
 class Step(Enum):
-    SESSION = auto()
     GROUP = auto()
+    SESSION = auto()
     CONFIRM = auto()
     RESOLVE = auto()
 
@@ -76,11 +75,11 @@ class PendingPublication:
     step: Step = Step.SESSION
     token: str | None = None
     message_id: int | None = None
+    group_id: int = 0
     session_id: int | None = None
-    chat_id: int | None = None
     offered_sessions: set[int] = field(default_factory=set[int])
     offered_pages: set[int] = field(default_factory=set[int])
-    offered_chats: set[int] = field(default_factory=set[int])
+    offered_groups: set[int] = field(default_factory=set[int])
 
 
 def callback(token: str, action: str, value: int | None = None) -> str:
@@ -111,16 +110,8 @@ def _session_label(draft: DraftDTO) -> str:
 
 
 class PublicationHandlers:
-    def __init__(
-        self,
-        organization_id: int,
-        identity: IdentityService,
-        authorization: AuthorizationService,
-        publication: PublicationService,
-    ) -> None:
-        self.organization_id = organization_id
-        self.identity = identity
-        self.authorization = authorization
+    def __init__(self, access: GroupAccess, publication: PublicationService) -> None:
+        self.access = access
         self.publication = publication
         self.pending: dict[tuple[int, int], PendingPublication] = {}
 
@@ -130,12 +121,10 @@ class PublicationHandlers:
             return None
         return chat.id, user.id
 
-    async def _actor(self, user_id: int) -> int:
-        person = await self.identity.find_by_telegram_user_id(user_id)
-        if person is None:
-            raise AccessDenied(messages.PUBLISH_DENIED)
-        await self.authorization.require_role(self.organization_id, person.id, MembershipRole.ADMIN)
-        return person.id
+    async def _actor(self, pending: PendingPublication, user_id: int) -> int:
+        """Ask Telegram again at each step. A demoted admin stops at once (decision T83)."""
+        await self.access.require_admin(pending.group_id, user_id)
+        return user_id
 
     async def _reply(self, update: Update, text: str) -> None:
         if update.effective_message is not None:
@@ -167,7 +156,7 @@ class PublicationHandlers:
         self, update: Update, pending: PendingPublication, actor: int, page: int = 0
     ) -> bool:
         drafts = await self.publication.list_drafts(
-            self.organization_id, actor, page * PAGE_SIZE, PAGE_SIZE + 1
+            pending.group_id, actor, page * PAGE_SIZE, PAGE_SIZE + 1
         )
         if not drafts and page == 0:
             await self._reply(update, messages.PUBLISH_NO_DRAFTS)
@@ -193,12 +182,25 @@ class PublicationHandlers:
             return
         self.pending.pop(key, None)
         try:
-            actor = await self._actor(key[1])
+            groups = await self.access.admin_groups(key[1])
+            if not groups:
+                raise AccessDenied(messages.PUBLISH_DENIED)
             pending = PendingPublication()
-            if await self._sessions(update, pending, actor):
+            if len(groups) > 1:
+                pending.offered_groups = {group.id for group in groups}
+                choices: list[tuple[str, str, int | None]] = [
+                    (group.title, "g", group.id) for group in groups
+                ]
+                await self._prompt(update, pending, Step.GROUP, messages.SELECT_GROUP, choices)
+                self.pending[key] = pending
+                return
+            pending.group_id = groups[0].id
+            if await self._sessions(update, pending, await self._actor(pending, key[1])):
                 self.pending[key] = pending
         except AccessDenied:
             await self._reply(update, messages.PUBLISH_DENIED)
+        except ApplicationError as exc:
+            await self._reply(update, str(exc))
         except SQLAlchemyError:
             await self._database_failure(update, key)
 
@@ -215,7 +217,7 @@ class PublicationHandlers:
                 action == "p" and value in pending.offered_pages
             )
         if pending.step is Step.GROUP:
-            return action == "g" and value in pending.offered_chats
+            return action == "g" and value in pending.offered_groups
         if pending.step is Step.CONFIRM:
             return action == "y"
         return action in ("v", "x")
@@ -243,37 +245,30 @@ class PublicationHandlers:
         pending.token = None
         await query.answer()
         try:
-            actor = await self._actor(key[1])
             if action == "c":
                 self.pending.pop(key, None)
                 await self._reply(update, messages.PUBLISH_CANCELLED)
+                return
+            if action == "g":
+                assert value is not None
+                pending.group_id = value
+            actor = await self._actor(pending, key[1])
+            if action == "g":
+                if not await self._sessions(update, pending, actor):
+                    self.pending.pop(key, None)
             elif action == "p":
                 assert value is not None
                 await self._sessions(update, pending, actor, value)
             elif action == "s":
                 assert value is not None
                 await self._session_selected(update, key, pending, actor, value)
-            elif action == "g":
-                assert value is not None and pending.session_id is not None
-                pending.chat_id = value
-                review = await self.publication.review(
-                    self.organization_id, actor, pending.session_id, value
-                )
-                await self._prompt(
-                    update,
-                    pending,
-                    Step.CONFIRM,
-                    messages.PUBLISH_REVIEW.format(group=review.chat.title, poll=review.text),
-                    [(messages.PUBLISH, "y", None)],
-                )
             elif action == "y":
-                assert pending.session_id is not None and pending.chat_id is not None
+                assert pending.session_id is not None
                 self.pending.pop(key, None)
                 result = await self.publication.publish(
-                    self.organization_id,
+                    pending.group_id,
                     actor,
                     pending.session_id,
-                    pending.chat_id,
                     TelegramPublisher(context.bot),
                 )
                 await self._result(update, key, pending, result)
@@ -281,7 +276,7 @@ class PublicationHandlers:
                 assert pending.session_id is not None
                 self.pending.pop(key, None)
                 result = await self.publication.resolve(
-                    self.organization_id, actor, pending.session_id, seen=action == "v"
+                    pending.group_id, actor, pending.session_id, seen=action == "v"
                 )
                 await self._result(update, key, pending, result, resolved=True)
         except AccessDenied:
@@ -301,7 +296,7 @@ class PublicationHandlers:
         actor: int,
         session_id: int,
     ) -> None:
-        draft = await self.publication.draft_state(self.organization_id, actor, session_id)
+        draft = await self.publication.draft_state(pending.group_id, actor, session_id)
         pending.session_id = draft.id
         if draft.publication is PublicationStatus.PUBLISH_UNKNOWN:
             await self._resolve_prompt(update, pending)
@@ -310,18 +305,13 @@ class PublicationHandlers:
             self.pending.pop(key, None)
             await self._reply(update, messages.PUBLISH_IN_PROGRESS)
             return
-        chats = await self.publication.list_chats(self.organization_id, actor)
-        if not chats:
-            self.pending.pop(key, None)
-            await self._reply(update, messages.PUBLISH_NO_GROUPS)
-            return
-        pending.offered_chats = {chat.id for chat in chats}
+        review = await self.publication.review(pending.group_id, actor, draft.id)
         await self._prompt(
             update,
             pending,
-            Step.GROUP,
-            messages.PUBLISH_SELECT_GROUP,
-            [(chat.title, "g", chat.id) for chat in chats],
+            Step.CONFIRM,
+            messages.PUBLISH_REVIEW.format(group=review.group.title, poll=review.text),
+            [(messages.PUBLISH, "y", None)],
         )
 
     async def _resolve_prompt(self, update: Update, pending: PendingPublication) -> None:

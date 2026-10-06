@@ -4,12 +4,11 @@ Attendee is a Telegram attendance bot foundation. SMU Samba Masala is the initia
 
 ## Status
 
-The bot supports configuration, logging, SQLite connections, migrations, local backups, and organization identity.
-The schema holds organizations, people, and organization memberships with `member` and `admin` roles.
-In a private chat, `/start` links a member's Telegram account, and an admin can upload a namelist.
-Admins can create attendance series and Draft sessions through `/attendance`.
-Each session keeps a fixed roster snapshot. An admin registers groups with `/register` and publishes a Draft session with `/publish`.
-Member responses remain deferred.
+One bot serves many Telegram groups. Each group owns its own namelist, series, sessions, and responses.
+A Telegram admin (creator or administrator) of a group is a bot admin for that group. The bot stores no admin list.
+In a private chat, a group admin uploads a namelist, creates Draft sessions with `/attendance`, publishes them with
+`/publish`, and reads reports with `/stats`. Members respond with the group poll buttons.
+Not built yet: linking an account from a poll tap (a private `/start` links nothing now), admin `/help`, reminders, and closure.
 
 ## Stack
 
@@ -43,24 +42,21 @@ Environment variables override `.env` values.
 | `TELEGRAM_BOT_TOKEN` | Required for bot startup; not required for migrations or backups |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./data/attendee.db` |
 | `APP_TIMEZONE` | `Asia/Singapore`; valid `zoneinfo` name |
-| `BOOTSTRAP_ADMIN_IDS` | Empty, `123,456`, or `[123,456]`; positive IDs only |
-| `BOT_ORGANIZATION` | Organization slug that the bot serves; required for bot startup |
 | `LOG_LEVEL` | `INFO`; also `DEBUG`, `WARNING`, `ERROR`, `CRITICAL` |
 | `BACKUP_DIR` | `./data/backups` |
 | `SQLITE_BUSY_TIMEOUT_MS` | `5000`; positive integer |
 
-Admin ID parsing removes duplicates. Only `attendee-setup` applies these IDs. See [Initial admin setup](#initial-admin-setup).
+No admin setting exists. See [Groups and admins](#groups-and-admins).
 Database URLs must select a file through `sqlite+aiosqlite`. Memory databases and URL query parameters are unsupported.
 
 ## Run locally
 
 ```sh
 uv run alembic upgrade head
-uv run attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
 uv run attendee
 ```
 
-A valid token, `BOT_ORGANIZATION`, and Telegram network access are required. Startup fails if no organization has that slug.
+A valid token and Telegram network access are required. Startup fails if the database has no tables.
 Stop the bot with Ctrl-C. Run only one bot instance per token and database.
 Local startup requires the separate migration command. Docker startup runs it automatically.
 
@@ -85,17 +81,9 @@ uv run alembic current
 uv run alembic history
 ```
 
-Revision `0001_identity` adds the `organizations`, `people`, and `memberships` tables.
-Revision `0002_import_matching` adds `unresolved_matches` and the `people.telegram_handle` index. It converts stored handles to lowercase without `@`. It sets a handle that Telegram would reject to `NULL`.
-Revision `0004_attendance` adds `attendance_series`, `attendance_sessions`, and `session_roster_entries`.
-It preserves existing identity and import data. It seeds no attendance data.
-Its downgrade drops these three tables and all attendance data.
-Revision `0005_organization_chats` adds `organization_chats`. Its downgrade drops that table and every registered group.
-Revision `0006_session_publications` adds `session_publications`. It alters no existing table. Its downgrade drops the attempt history; session status stays unchanged.
-Revision `0007_session_responses` adds `session_responses` and `session_response_events`. It alters no existing table. Its downgrade drops every response.
-
-Revision `0003_candidate_rejected` adds the `candidate_rejected` unresolved reason. It copies the `unresolved_matches` table and keeps every row. Its downgrade changes those rows to `no_match`.
-An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
+Revision `0001_groups` adds `groups` and every group-scoped table. It replaced revisions `0001_identity` to
+`0007_session_responses` on 2026-10-07, before any live data existed. A database from an old revision stops
+`upgrade head` with an unknown-revision error. Delete that database file and upgrade again.
 `uv run alembic downgrade base` drops every table and its data.
 Add new model modules to the import in `alembic/env.py`. Generate a revision after a model change:
 
@@ -105,48 +93,38 @@ uv run alembic revision --autogenerate -m "Describe the schema change"
 
 Review the generated revision before an upgrade. Never use `create_all()` as the production migration strategy.
 
-## Initial admin setup
+## Groups and admins
 
-Run the setup command after `alembic upgrade head`:
+1. Add the bot to the Telegram group or supergroup. The bot saves the group at once. No command is needed.
+2. Every Telegram creator or administrator of that group is a bot admin for that group only.
+3. To add or remove a bot admin, change the person's admin rights in Telegram.
 
-```sh
-BOOTSTRAP_ADMIN_IDS=123456789,987654321 \
-  uv run attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
-```
-
-In Docker, set `BOOTSTRAP_ADMIN_IDS` in `.env`, start the service, and run:
-
-```sh
-docker compose exec -T bot attendee-setup --organization smu-samba-masala --name "SMU Samba Masala"
-```
-
-- The slug is the stable organization key: lowercase letters, digits, and single hyphens.
-- The command creates the organization if the slug is new. A rerun keeps the stored name.
-- Each listed Telegram user ID gets the `admin` role in the named organization only.
-- A rerun adds missing admins and promotes a listed `member`. It never demotes or removes anyone.
-- One transaction covers the run. A failure leaves no partial records. An empty ID list fails.
-- The command needs no bot token. Remove an admin by a manual database change until admin management exists.
+The bot asks Telegram before each admin action and each admin button, so a change takes effect at the next step.
+Every admin of a group sees all private reasons of that group.
+An admin of several groups picks the group at the start of `/attendance`, `/publish`, `/stats`, or a namelist upload.
+If the bot leaves a group, the group's data stays, and nobody can use it until the bot is added again.
+The bot follows a group upgrade to a supergroup and keeps the data. Channels are not supported.
 
 ## Namelist import
 
 The file is CSV (UTF-8) or XLSX (first sheet). Required columns: `Name`, `Telegram Handle`. Optional column: `Telegram ID`. The import ignores other columns and lists them.
 
 ```sh
-uv run attendee-import --organization smu-samba-masala namelist.csv          # preview only
-uv run attendee-import --organization smu-samba-masala --apply namelist.csv  # write
+uv run attendee-import --chat-id -1001234567890 namelist.csv          # preview only
+uv run attendee-import --chat-id -1001234567890 --apply namelist.csv  # write
 ```
 
 - The preview lists the rows to create, update, and keep, and the rejected rows with reasons.
 - A rejected row blocks the whole import. The command exits with code 2 and writes nothing.
 - The import matches by Telegram ID, then by handle. It never matches by name.
-- A member absent from the file stays unchanged. The import never removes or demotes anyone.
-- New people get the `member` role. The command never stores the file.
+- A member absent from the file stays unchanged. The import never removes anyone.
+- The bot must already be in the group with that chat ID. The command never stores the file.
 
 In Docker, copy the file into the container first, then run `docker compose exec -T bot attendee-import ...`.
 
 ### Upload through Telegram
 
-1. Open a private chat with the bot as an admin of the `BOT_ORGANIZATION` organization.
+1. Open a private chat with the bot as a Telegram admin of the group.
 2. Send the namelist as a `.csv` or `.xlsx` document of at most 5 MB.
 3. Read the preview. It shows counts, ignored columns, rejected rows, and duplicate-name warnings.
 4. Press Apply or Cancel.
@@ -156,15 +134,13 @@ A duplicate-name warning means that a new row has the name of an existing member
 
 ## Member onboarding
 
-A member sends `/start` to the bot in a private chat.
-
-- A linked Telegram account gets a confirmation only.
-- If the Telegram handle matches one namelist entry, the bot asks "Are you <name>?". Yes links the account. No links nothing.
-- In every other case, the bot asks the member to contact an admin. The bot records an unresolved match for the admin.
+A private `/start` does not say which group the member belongs to, so it links nothing. The bot asks the member to tap
+a button on the group poll. Linking from that tap comes next: if the Telegram handle matches one namelist entry of
+that group, the bot asks "Are you <name>?" in the private chat. Yes links the account. No links nothing.
 
 ## Create a Draft attendance session
 
-An admin of `BOT_ORGANIZATION` uses `/attendance` in a private chat.
+A group admin uses `/attendance` in a private chat.
 
 1. Select an existing series, or press **Create new series**.
 2. Enter the session date: `2026-10-13` or `13 Oct 2026`.
@@ -183,26 +159,20 @@ A deadline can use either date format with `HH:MM` or `8:00 PM`. A comma before 
 The bot rejects relative dates and local times that are ambiguous or do not exist during a daylight-saving transition.
 A past deadline never closes or opens a session. Draft sessions stay Draft.
 
-Every current organization membership enters the snapshot, including admins and members without a linked Telegram account.
+Every person on the group's namelist enters the snapshot, including members without a linked Telegram account.
+A group admin who is not on the namelist is not on the roster.
 If the roster changes before confirmation, the bot requires confirmation of a new summary.
-Later membership changes never alter a saved snapshot.
+Later namelist changes never alter a saved snapshot.
 
 The bot saves a new series, session, and snapshot in one transaction after confirmation.
 `/cancel` creates nothing. Another `/attendance` replaces the unfinished conversation.
 A restart cancels unfinished conversations. Saved Draft sessions survive a restart.
 Old buttons expire. A repeated confirmation creates no duplicate session.
 
-## Register a group
-
-Add the bot to the Telegram group. An admin of `BOT_ORGANIZATION` sends `/register` inside the group.
-The sender must also be the creator or an administrator of the group, and must not post anonymously.
-One organization can register several groups. A group belongs to one organization only. Channels are not supported.
-The bot follows a group upgrade to a supergroup and keeps the registration.
-
 ## Publish a poll
 
 An admin sends `/publish` in a private chat with the bot. The bot lists Draft sessions in pages of 10.
-The admin selects a session, then a registered group, then reviews the poll text and taps Publish.
+The admin selects a session, then reviews the poll text and taps Publish. The poll goes to the session's group.
 The poll shows the series, the date or label, and the local deadline. It shows no counts.
 A success opens the session. A Telegram rejection marks the attempt failed. Send `/publish` again to retry.
 

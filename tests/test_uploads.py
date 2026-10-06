@@ -1,22 +1,18 @@
 import io
 
 import pytest
+from conftest import ADMIN_ID, add_group
 from openpyxl import Workbook
 from sqlalchemy import func, select
 from telegram_fakes import buttons, callback_update, context, document, message_update, replies
 
-from attendee.application.authorization import AuthorizationService
 from attendee.application.identity import IdentityService
 from attendee.application.imports import ImportService
 from attendee.application.matching import AccountMatchingService
-from attendee.application.memberships import MembershipService
-from attendee.application.organizations import OrganizationService
-from attendee.domain.identity import MembershipRole
-from attendee.persistence.models import Membership
+from attendee.persistence.models import Person
 from attendee.telegram import messages
-from attendee.telegram.uploads import UploadHandlers, import_callback
+from attendee.telegram.uploads import UploadHandlers, group_callback, import_callback
 
-ADMIN_ID = 1001
 CSV = b"Name,Telegram Handle,Section\nJohn Tan,@johntan,Bells\nSarah Lim,@sarahlim,Surdo\n"
 
 
@@ -31,38 +27,31 @@ def xlsx(rows):
 
 
 @pytest.fixture
-async def club(session_factory):
-    return await OrganizationService(session_factory).create_organization("club", "Club")
+async def club(group):
+    return group
 
 
-async def add_person(factory, organization_id, name, telegram_user_id, role):
-    person = await IdentityService(factory).create_person(name, telegram_user_id)
-    await MembershipService(factory).add_membership(organization_id, person.id, role)
-    return person
-
-
-@pytest.fixture
-async def admin(club, session_factory):
-    return await add_person(session_factory, club.id, "Admin", ADMIN_ID, MembershipRole.ADMIN)
+async def add_person(factory, group_id, name, telegram_user_id=None):
+    return await IdentityService(factory).create_person(group_id, name, telegram_user_id)
 
 
 @pytest.fixture
-def handlers(club, session_factory):
+def admin(group):
+    """ADMIN_ID is a Telegram admin of the group and is not on its namelist."""
+    return ADMIN_ID
+
+
+@pytest.fixture
+def handlers(access, session_factory):
     return UploadHandlers(
-        club.id,
-        IdentityService(session_factory),
-        AuthorizationService(session_factory),
-        ImportService(session_factory),
-        AccountMatchingService(session_factory),
+        access, ImportService(session_factory), AccountMatchingService(session_factory)
     )
 
 
-async def member_count(factory, organization_id):
+async def member_count(factory, group_id):
     async with factory() as session:
         return await session.scalar(
-            select(func.count())
-            .select_from(Membership)
-            .where(Membership.organization_id == organization_id)
+            select(func.count()).select_from(Person).where(Person.group_id == group_id)
         )
 
 
@@ -82,6 +71,16 @@ async def press(handlers, data, telegram_user_id=ADMIN_ID):
     return call.args[1]
 
 
+async def pick(handlers, data, telegram_user_id=ADMIN_ID):
+    update = callback_update(telegram_user_id, "admin", data)
+    bot_context = context()
+    await handlers.pick_group(update, bot_context)
+    update.callback_query.answer.assert_awaited_once()
+    calls = bot_context.bot.send_message.await_args_list
+    assert all(call.args[0] == telegram_user_id for call in calls)
+    return [(call.args[1], call.kwargs.get("reply_markup")) for call in calls]
+
+
 def apply_and_cancel(reply_list):
     [apply, cancel] = buttons(reply_list[-1][1])
     assert (apply[0], cancel[0]) == (messages.APPLY, messages.CANCEL)
@@ -89,7 +88,7 @@ def apply_and_cancel(reply_list):
 
 
 async def test_member_and_stranger_are_denied(handlers, club, session_factory):
-    await add_person(session_factory, club.id, "Member", 2002, MembershipRole.MEMBER)
+    await add_person(session_factory, club.id, "Member", 2002)
     for telegram_user_id in (2002, 3003):
         assert await upload(handlers, "list.csv", CSV, telegram_user_id) == [
             (messages.UPLOAD_DENIED, None)
@@ -97,10 +96,42 @@ async def test_member_and_stranger_are_denied(handlers, club, session_factory):
     assert await member_count(session_factory, club.id) == 1
 
 
-async def test_admin_of_another_organization_is_denied(handlers, club, session_factory):
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
-    await add_person(session_factory, other.id, "Other Admin", 4004, MembershipRole.ADMIN)
-    assert await upload(handlers, "list.csv", CSV, 4004) == [(messages.UPLOAD_DENIED, None)]
+async def test_failed_admin_check_reports_and_applies_nothing(handlers, club, admins):
+    admins.fail = True
+    assert await upload(handlers, "list.csv", CSV) == [(messages.ADMIN_CHECK_FAILED, None)]
+
+
+async def test_admin_of_two_groups_picks_the_group(handlers, club, session_factory, admins, admin):
+    other = await add_group(session_factory, -200, "Band")
+    admins.grant(-200, admin)
+    [(text, markup)] = await upload(handlers, "list.csv", CSV)
+    assert text == messages.SELECT_GROUP
+    [(band, band_data), (samba, samba_data)] = buttons(markup)
+    assert (band, samba) == ("Band", "Samba Group")
+    # The group ID in a button is a claim: an unoffered group or a wrong token finds nothing.
+    token = band_data.split(":")[2]
+    for data in (group_callback(token, 999), group_callback("unknown", other.id), "i:g:x:y"):
+        assert await pick(handlers, data) == [(messages.PREVIEW_EXPIRED, None)]
+    sent = await pick(handlers, band_data)
+    assert "New: 2" in sent[0][0]
+    apply, _ = apply_and_cancel(sent)
+    assert await pick(handlers, band_data) == [(messages.PREVIEW_EXPIRED, None)]
+    assert await press(handlers, apply) == messages.APPLIED.format(
+        created=2, updated=0, unchanged=0
+    )
+    assert await member_count(session_factory, other.id) == 2
+    assert await member_count(session_factory, club.id) == 0
+
+
+async def test_group_choice_checks_the_admin_role_again(
+    handlers, club, session_factory, admins, admin
+):
+    await add_group(session_factory, -200, "Band")
+    admins.grant(-200, admin)
+    [(_, markup)] = await upload(handlers, "list.csv", CSV)
+    [(_, band_data), _] = buttons(markup)
+    admins.revoke(-200, admin)
+    assert await pick(handlers, band_data) == [(messages.UPLOAD_DENIED, None)]
 
 
 @pytest.mark.parametrize(
@@ -125,22 +156,22 @@ async def test_preview_then_apply(handlers, admin, club, session_factory, file_n
     assert "New: 2" in text
     assert "Ignored columns: Section" in text
     assert messages.PREVIEW_UNRESOLVED.format(count=0) in text
-    assert await member_count(session_factory, club.id) == 1
+    assert await member_count(session_factory, club.id) == 0
     apply, _ = apply_and_cancel(reply_list)
     assert await press(handlers, apply) == messages.APPLIED.format(
         created=2, updated=0, unchanged=0
     )
-    assert await member_count(session_factory, club.id) == 3
+    assert await member_count(session_factory, club.id) == 2
     # A repeated Apply has no extra effect.
     assert await press(handlers, apply) == messages.PREVIEW_EXPIRED
-    assert await member_count(session_factory, club.id) == 3
+    assert await member_count(session_factory, club.id) == 2
 
 
 async def test_cancel_applies_nothing(handlers, admin, club, session_factory):
     apply, cancel = apply_and_cancel(await upload(handlers, "list.csv", CSV))
     assert await press(handlers, cancel) == messages.CANCELLED
     assert await press(handlers, apply) == messages.PREVIEW_EXPIRED
-    assert await member_count(session_factory, club.id) == 1
+    assert await member_count(session_factory, club.id) == 0
 
 
 async def test_rejected_preview_has_no_apply_button(handlers, admin):
@@ -164,9 +195,9 @@ async def test_change_between_preview_and_apply_applies_nothing(
     handlers, admin, club, session_factory
 ):
     apply, _ = apply_and_cancel(await upload(handlers, "list.csv", CSV))
-    await add_person(session_factory, club.id, "Late", 5005, MembershipRole.MEMBER)
+    await add_person(session_factory, club.id, "Late", 5005)
     assert await press(handlers, apply) == messages.APPLY_CONFLICT
-    assert await member_count(session_factory, club.id) == 2
+    assert await member_count(session_factory, club.id) == 1
 
 
 async def test_stale_and_foreign_buttons(handlers, admin, club, session_factory):
@@ -178,18 +209,19 @@ async def test_stale_and_foreign_buttons(handlers, admin, club, session_factory)
     assert await press(handlers, apply) != messages.PREVIEW_EXPIRED
 
 
-async def test_admin_role_is_checked_again_on_apply(handlers, admin, club, session_factory):
+async def test_admin_role_is_checked_again_on_apply(handlers, admin, club, session_factory, admins):
     apply, _ = apply_and_cancel(await upload(handlers, "list.csv", CSV))
-    async with session_factory.begin() as session:
-        membership = await session.scalar(
-            select(Membership).where(Membership.person_id == admin.id)
-        )
-        membership.role = MembershipRole.MEMBER
+    admins.revoke(club.telegram_chat_id, admin)
     assert await press(handlers, apply) == messages.UPLOAD_DENIED
-    assert await member_count(session_factory, club.id) == 1
+    assert await member_count(session_factory, club.id) == 0
+    admins.grant(club.telegram_chat_id, admin)
+    apply, _ = apply_and_cancel(await upload(handlers, "list.csv", CSV))
+    admins.fail = True
+    assert await press(handlers, apply) == messages.ADMIN_CHECK_FAILED
 
 
 async def test_duplicate_name_warning_in_upload(handlers, admin, club, session_factory):
+    await add_person(session_factory, club.id, "Admin")
     reply_list = await upload(handlers, "list.csv", b"Name,Telegram Handle\nadmin,@newadmin\n")
     text = "\n".join(text for text, _ in reply_list)
     assert "check row 2: someone named admin is already on the list" in text

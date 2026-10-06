@@ -18,11 +18,9 @@ def isolated_environment(monkeypatch, tmp_path):
         "TELEGRAM_BOT_TOKEN",
         "DATABASE_URL",
         "APP_TIMEZONE",
-        "BOOTSTRAP_ADMIN_IDS",
         "LOG_LEVEL",
         "BACKUP_DIR",
         "SQLITE_BUSY_TIMEOUT_MS",
-        "BOT_ORGANIZATION",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
@@ -77,19 +75,66 @@ async def session_factory(migrated_settings):
         await engine.dispose()
 
 
+GROUP_CHAT_ID = -100
+ADMIN_ID = 1001
+
+
+class FakeAdmins:
+    """Stand-in for the Telegram group-admin check. Holds (chat ID, user ID) pairs."""
+
+    def __init__(self) -> None:
+        self.pairs: set[tuple[int, int]] = set()
+        self.calls: list[tuple[int, int]] = []
+        self.fail = False
+
+    def grant(self, telegram_chat_id: int, telegram_user_id: int) -> None:
+        self.pairs.add((telegram_chat_id, telegram_user_id))
+
+    def revoke(self, telegram_chat_id: int, telegram_user_id: int) -> None:
+        self.pairs.discard((telegram_chat_id, telegram_user_id))
+
+    async def is_admin(self, telegram_chat_id: int, telegram_user_id: int) -> bool:
+        from attendee import copy
+        from attendee.application.errors import AdminCheckFailed
+
+        self.calls.append((telegram_chat_id, telegram_user_id))
+        if self.fail:
+            raise AdminCheckFailed(copy.ADMIN_CHECK_FAILED)
+        return (telegram_chat_id, telegram_user_id) in self.pairs
+
+
 @pytest.fixture
-async def attendance_club(session_factory):
+def admins():
+    return FakeAdmins()
+
+
+@pytest.fixture
+def access(session_factory, admins):
+    from attendee.application.groups import GroupAccess
+
+    return GroupAccess(session_factory, admins)
+
+
+async def add_group(session_factory, telegram_chat_id=GROUP_CHAT_ID, title="Samba Group"):
+    from attendee.application.groups import GroupService
+    from attendee.domain.chats import ChatType
+
+    return await GroupService(session_factory).joined(telegram_chat_id, ChatType.SUPERGROUP, title)
+
+
+@pytest.fixture
+async def group(session_factory, admins):
+    """One group. ADMIN_ID is a Telegram admin of it and is not on its namelist."""
+    result = await add_group(session_factory)
+    admins.grant(result.telegram_chat_id, ADMIN_ID)
+    return result
+
+
+@pytest.fixture
+async def attendance_club(session_factory, group, access):
+    """(group, admin Telegram user ID, member person, AttendanceService)."""
     from attendee.application.attendance import AttendanceService
     from attendee.application.identity import IdentityService
-    from attendee.application.memberships import MembershipService
-    from attendee.application.organizations import OrganizationService
-    from attendee.domain.identity import MembershipRole
 
-    org = await OrganizationService(session_factory).create_organization("club", "Club")
-    identity = IdentityService(session_factory)
-    memberships = MembershipService(session_factory)
-    admin = await identity.create_person("Admin", 1001)
-    member = await identity.create_person("Member")
-    await memberships.add_membership(org.id, admin.id, MembershipRole.ADMIN)
-    await memberships.add_membership(org.id, member.id, MembershipRole.MEMBER)
-    return org, admin, member, AttendanceService(session_factory)
+    member = await IdentityService(session_factory).create_person(group.id, "Member")
+    return group, ADMIN_ID, member, AttendanceService(session_factory, access)

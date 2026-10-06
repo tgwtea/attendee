@@ -2,6 +2,7 @@ import io
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from conftest import add_group
 from openpyxl import load_workbook
 from sqlalchemy import update
 from test_attendance import add_member, create
@@ -34,6 +35,8 @@ async def set_status(factory, session_id, status):
 async def series(attendance_club, session_factory):
     """Closed 13 Oct, Open 20 Oct (Zed joined after 13 Oct), and a Draft 27 Oct."""
     org, admin, _, _ = attendance_club
+    # This admin is also on the namelist, so the admin is on the roster too.
+    await add_member(session_factory, org.id, "Admin", telegram_id=ADMIN_TG)
     await add_member(session_factory, org.id, "Sarah", telegram_id=SARAH_TG)
     first = await create(attendance_club)
     await add_member(session_factory, org.id, "zed")
@@ -63,8 +66,8 @@ async def series(attendance_club, session_factory):
 
 
 @pytest.fixture
-def service(session_factory):
-    return ReportService(session_factory)
+def service(session_factory, access):
+    return ReportService(session_factory, access)
 
 
 def test_cell_values():
@@ -94,7 +97,7 @@ def test_headings_and_names():
 
 async def test_series_report_cells(series, service):
     org, admin, *_ = series
-    report = await service.series_report(org.id, admin.id, series[2].series_id, NOW)
+    report = await service.series_report(org.id, admin, series[2].series_id, NOW)
     assert report.series_name == "Patrons Day"
     # Draft is left out. Closed comes first and counts; Open follows.
     assert [(column.session_date.day, column.complete) for column in report.columns] == [
@@ -112,19 +115,19 @@ async def test_series_report_cells(series, service):
 async def test_archived_open_session_counts_and_leaves_the_list(series, service, archive_after):
     org, admin, first, second, _ = series
     later = second.deadline + archive_after + timedelta(seconds=1)
-    report = await service.series_report(org.id, admin.id, first.series_id, later)
+    report = await service.series_report(org.id, admin, first.series_id, later)
     assert [column.complete for column in report.columns] == [True, True]
-    _, sessions = await service.list_sessions(org.id, admin.id, first.series_id, later)
+    _, sessions = await service.list_sessions(org.id, admin, first.series_id, later)
     assert sessions == []
 
 
 async def test_session_report(series, service):
     org, admin, first, *_ = series
-    name, sessions = await service.list_sessions(org.id, admin.id, first.series_id, NOW)
+    name, sessions = await service.list_sessions(org.id, admin, first.series_id, NOW)
     assert name == "Patrons Day"
     assert [session.session_date.day for session in sessions] == [20, 13]
     assert [session.status for session in sessions] == ["Open", "Closed"]
-    report = await service.session_report(org.id, admin.id, first.id, NOW)
+    report = await service.session_report(org.id, admin, first.id, NOW)
     assert report.responded == 2 and len(report.members) == 3
     assert report.count(ResponseStatus.LATE) == 1
     assert [(m.name, m.status, m.reason) for m in report.members] == [
@@ -134,26 +137,31 @@ async def test_session_report(series, service):
     ]
 
 
-async def test_reports_need_admin_and_skip_drafts(series, service, attendance_club):
+async def test_reports_need_admin_and_skip_drafts(series, service, session_factory, admins):
     org, admin, first, _, draft = series
-    member = attendance_club[2]
+    # Sarah is on the namelist but is not a Telegram admin of the group.
     with pytest.raises(AccessDenied):
-        await service.series_report(org.id, member.id, first.series_id, NOW)
+        await service.series_report(org.id, SARAH_TG, first.series_id, NOW)
     with pytest.raises(AccessDenied):
-        await service.session_report(org.id, member.id, first.id, NOW)
+        await service.session_report(org.id, SARAH_TG, first.id, NOW)
+    # An admin of another group cannot read this group's series or sessions by ID.
+    other = await add_group(session_factory, -200, "Band")
+    admins.grant(other.telegram_chat_id, SARAH_TG)
     with pytest.raises(NotFound):
-        await service.session_report(org.id, admin.id, draft.id, NOW)
+        await service.series_report(other.id, SARAH_TG, first.series_id, NOW)
     with pytest.raises(NotFound):
-        await service.series_report(org.id, admin.id, 999, NOW)
-    assert [choice.name for choice in await service.list_series(org.id, admin.id)] == [
-        "Patrons Day"
-    ]
+        await service.session_report(other.id, SARAH_TG, first.id, NOW)
+    with pytest.raises(NotFound):
+        await service.session_report(org.id, admin, draft.id, NOW)
+    with pytest.raises(NotFound):
+        await service.series_report(org.id, admin, 999, NOW)
+    assert [choice.name for choice in await service.list_series(org.id, admin)] == ["Patrons Day"]
 
 
 async def test_draft_only_series_is_not_listed(attendance_club, service):
     org, admin, _, _ = attendance_club
     await create(attendance_club)
-    assert await service.list_series(org.id, admin.id) == []
+    assert await service.list_series(org.id, admin) == []
 
 
 def values(sheet):
@@ -162,7 +170,7 @@ def values(sheet):
 
 async def test_workbook_has_live_formulas_over_complete_columns(series, service):
     org, admin, first, *_ = series
-    report = await service.series_report(org.id, admin.id, first.series_id, NOW)
+    report = await service.series_report(org.id, admin, first.series_id, NOW)
     sheet = load_workbook(io.BytesIO(build_workbook(report))).active
     assert sheet is not None
     assert sheet.title == "Patrons Day"
@@ -186,7 +194,7 @@ async def test_workbook_has_live_formulas_over_complete_columns(series, service)
 async def test_workbook_without_complete_sessions_has_zero_totals(series, service):
     org, admin, first, second, _ = series
     await set_status(service.session_factory, first.id, SessionStatus.OPEN)
-    report = await service.series_report(org.id, admin.id, first.series_id, NOW)
+    report = await service.series_report(org.id, admin, first.series_id, NOW)
     sheet = load_workbook(io.BytesIO(build_workbook(report))).active
     assert sheet is not None
     assert values(sheet)[1][2:5] == [0, 0, None]
@@ -197,14 +205,14 @@ async def test_workbook_writes_formula_like_names_as_text(series, service, sessi
     org, admin, first, *_ = series
     await add_member(session_factory, org.id, '=HYPERLINK("http://x","y")')
     later = await create(
-        (org, admin, None, AttendanceService(session_factory)),
+        (org, admin, None, AttendanceService(session_factory, service.access)),
         series_id=first.series_id,
         new_series_name=None,
         session_date=date(2026, 11, 3),
         deadline=datetime(2026, 11, 2, 12, tzinfo=UTC),
     )
     await set_status(session_factory, later.id, SessionStatus.OPEN)
-    report = await service.series_report(org.id, admin.id, first.series_id, NOW)
+    report = await service.series_report(org.id, admin, first.series_id, NOW)
     assert report.rows[0].name.startswith("=")
     sheet = load_workbook(io.BytesIO(build_workbook(report))).active
     assert sheet is not None
@@ -214,7 +222,7 @@ async def test_workbook_writes_formula_like_names_as_text(series, service, sessi
 
 async def test_export_removes_xml_control_characters(series, service):
     org, admin, first, *_ = series
-    report = await service.series_report(org.id, admin.id, first.series_id, NOW)
+    report = await service.series_report(org.id, admin, first.series_id, NOW)
     row = report.rows[0].model_copy(update={"name": "=Name\x0bSurname\x00"})
     column = report.columns[0].model_copy(update={"label": "Week\x01One"})
     report = report.model_copy(

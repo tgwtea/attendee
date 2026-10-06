@@ -1,18 +1,14 @@
 import asyncio
 
 import pytest
+from conftest import add_group
 from sqlalchemy import func, select
 
 from attendee.application.identity import IdentityService
 from attendee.application.matching import AccountMatchingService
-from attendee.application.memberships import MembershipService
-from attendee.application.organizations import OrganizationService
-from attendee.domain.identity import MembershipRole
 from attendee.domain.matching import MatchOutcome, UnresolvedReason
 from attendee.persistence.database import create_engine, create_session_factory
-from attendee.persistence.models import Membership, Person, UnresolvedMatch
-
-MEMBER = MembershipRole.MEMBER
+from attendee.persistence.models import Person, UnresolvedMatch
 
 
 @pytest.fixture
@@ -21,14 +17,12 @@ def matching(session_factory):
 
 
 @pytest.fixture
-async def club(session_factory):
-    return await OrganizationService(session_factory).create_organization("club", "Club")
+async def club(group):
+    return group
 
 
-async def add_member(factory, organization_id, name, handle=None, telegram_user_id=None):
-    person = await IdentityService(factory).create_person(name, telegram_user_id, handle)
-    await MembershipService(factory).add_membership(organization_id, person.id, MEMBER)
-    return person
+async def add_member(factory, group_id, name, handle=None, telegram_user_id=None):
+    return await IdentityService(factory).create_person(group_id, name, telegram_user_id, handle)
 
 
 async def unresolved_rows(factory):
@@ -36,10 +30,10 @@ async def unresolved_rows(factory):
         return list(await session.scalars(select(UnresolvedMatch).order_by(UnresolvedMatch.id)))
 
 
-async def bind(matching, organization_id, telegram_user_id, handle):
-    proposal = await matching.match(organization_id, telegram_user_id, handle)
+async def bind(matching, group_id, telegram_user_id, handle):
+    proposal = await matching.match(group_id, telegram_user_id, handle)
     assert proposal.outcome is MatchOutcome.PROPOSED
-    return await matching.confirm(organization_id, telegram_user_id, handle, proposal.person.id)
+    return await matching.confirm(group_id, telegram_user_id, handle, proposal.person.id)
 
 
 async def bound_count(factory, telegram_user_id):
@@ -164,23 +158,15 @@ async def test_ambiguous_handle_binds_nobody(matching, club, session_factory):
     assert bound == 0
 
 
-async def test_telegram_id_owned_by_another_person(matching, club, session_factory):
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
-    await add_member(session_factory, other.id, "Owner", "@owner", 555)
-    await add_member(session_factory, club.id, "Sarah", "@sarahlim")
-    result = await matching.match(club.id, 555, "@sarahlim")
-    assert (result.outcome, result.reason) == (
-        MatchOutcome.UNRESOLVED,
-        UnresolvedReason.TELEGRAM_ID_TAKEN,
-    )
-    # Matching never grants a membership in another organization.
-    async with session_factory() as session:
-        count = await session.scalar(
-            select(func.count())
-            .select_from(Membership)
-            .where(Membership.organization_id == club.id)
-        )
-    assert count == 1
+async def test_telegram_id_bound_in_another_group_does_not_block(matching, club, session_factory):
+    """Each group has its own copy of a person, so one user links in each group (T82)."""
+    other = await add_group(session_factory, -200, "Other")
+    owner = await add_member(session_factory, other.id, "Owner", "@owner", 555)
+    sarah = await add_member(session_factory, club.id, "Sarah", "@sarahlim")
+    result = await bind(matching, club.id, 555, "@sarahlim")
+    assert (result.outcome, result.person.id) == (MatchOutcome.BOUND_BY_HANDLE, sarah.id)
+    assert (await matching.match(other.id, 555, "@owner")).person.id == owner.id
+    assert await bound_count(session_factory, 555) == 2
 
 
 async def test_repeated_call_has_no_extra_effect(matching, club, session_factory):
@@ -206,8 +192,8 @@ async def test_later_success_resolves_the_record(matching, club, session_factory
     assert record.resolved_at is not None
 
 
-async def test_matching_is_isolated_per_organization(matching, club, session_factory):
-    other = await OrganizationService(session_factory).create_organization("other", "Other")
+async def test_matching_is_isolated_per_group(matching, club, session_factory):
+    other = await add_group(session_factory, -200, "Other")
     await add_member(session_factory, other.id, "Sarah", "@sarahlim")
     result = await matching.match(club.id, 555, "@sarahlim")
     assert result.reason is UnresolvedReason.NO_MATCH

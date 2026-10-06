@@ -20,7 +20,7 @@ from attendee.repositories.responses import ResponseRepository
 
 
 class NotLinked(ApplicationError):
-    """No person has this Telegram user ID."""
+    """No person in this group has this Telegram user ID."""
 
 
 class NotOnRoster(ApplicationError):
@@ -28,7 +28,7 @@ class NotOnRoster(ApplicationError):
 
 
 class SessionNotOpen(ApplicationError):
-    """The session is Draft, Closed, archived, or not in this organization."""
+    """The session is Draft, Closed, archived, or not in this group."""
 
 
 class ResponseTarget(BaseModel):
@@ -57,21 +57,21 @@ class ResponseService:
     async def _target(
         self,
         session: AsyncSession,
-        organization_id: int,
+        group_id: int,
         telegram_user_id: int,
         session_id: int,
         now: datetime,
     ) -> tuple[int, AttendanceSession, ResponseTarget]:
-        person = await PersonRepository(session).get_by_telegram_user_id(telegram_user_id)
+        person = await PersonRepository(session, group_id).get_by_telegram_user_id(telegram_user_id)
         if person is None:
             raise NotLinked
-        attendance = AttendanceRepository(session, organization_id)
+        attendance = AttendanceRepository(session, group_id)
         row = await attendance.get_session(session_id)
         # A missed deadline does not block an Open session (PRD §7, decision T49).
         # An archived session does (decision T69).
         if row is None or row.status != SessionStatus.OPEN or is_archived(row.deadline, now):
             raise SessionNotOpen
-        responses = ResponseRepository(session, organization_id)
+        responses = ResponseRepository(session, group_id)
         if not await responses.on_roster(row.id, person.id):
             raise NotOnRoster
         series = await attendance.series(row.series_id)
@@ -88,7 +88,7 @@ class ResponseService:
 
     async def check(
         self,
-        organization_id: int,
+        group_id: int,
         telegram_user_id: int,
         session_id: int,
         now: datetime | None = None,
@@ -96,13 +96,13 @@ class ResponseService:
         """Raise NotLinked, SessionNotOpen, or NotOnRoster. Write nothing."""
         async with self.session_factory() as session:
             _, _, target = await self._target(
-                session, organization_id, telegram_user_id, session_id, now or datetime.now(UTC)
+                session, group_id, telegram_user_id, session_id, now or datetime.now(UTC)
             )
             return target
 
     async def record(
         self,
-        organization_id: int,
+        group_id: int,
         telegram_user_id: int,
         session_id: int,
         status: ResponseStatus,
@@ -117,16 +117,16 @@ class ResponseService:
         now = now or datetime.now(UTC)
         async with write_session(self.session_factory) as session:
             person_id, row, _ = await self._target(
-                session, organization_id, telegram_user_id, session_id, now
+                session, group_id, telegram_user_id, session_id, now
             )
-            repository = ResponseRepository(session, organization_id)
+            repository = ResponseRepository(session, group_id)
             current = await repository.current(row.id, person_id)
             if current is not None and current.status == status and current.reason == reason:
                 return ResponseResult(status=status, reason=reason, changed=False)
             if current is None:
                 await repository.add(
                     SessionResponse(
-                        organization_id=organization_id,
+                        group_id=group_id,
                         session_id=row.id,
                         person_id=person_id,
                         status=status.value,
@@ -141,7 +141,7 @@ class ResponseService:
                 current.updated_at = now
             await repository.add_event(
                 SessionResponseEvent(
-                    organization_id=organization_id,
+                    group_id=group_id,
                     session_id=row.id,
                     person_id=person_id,
                     status=status.value,
