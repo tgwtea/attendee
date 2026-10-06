@@ -136,7 +136,7 @@ async def test_deadline_read_does_not_change_status(attendance_club, session_fac
     saved = await create(attendance_club)
     after = saved.deadline + timedelta(seconds=1)
     assert (await service.get_session(org.id, admin.id, saved.id, after)).display_status == "Draft"
-    # Only a fixture opens a session. This phase adds no publication operation.
+    # A fixture opens the session. test_publication.py covers the real draft->open change.
     async with session_factory.begin() as session:
         await session.execute(
             update(AttendanceSession).where(AttendanceSession.id == saved.id).values(status="open")

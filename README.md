@@ -8,7 +8,8 @@ The bot supports configuration, logging, SQLite connections, migrations, local b
 The schema holds organizations, people, and organization memberships with `member` and `admin` roles.
 In a private chat, `/start` links a member's Telegram account, and an admin can upload a namelist.
 Admins can create attendance series and Draft sessions through `/attendance`.
-Each session keeps a fixed roster snapshot. Publication and responses remain deferred.
+Each session keeps a fixed roster snapshot. An admin registers groups with `/register` and publishes a Draft session with `/publish`.
+Member responses remain deferred.
 
 ## Stack
 
@@ -90,6 +91,7 @@ Revision `0004_attendance` adds `attendance_series`, `attendance_sessions`, and 
 It preserves existing identity and import data. It seeds no attendance data.
 Its downgrade drops these three tables and all attendance data.
 Revision `0005_organization_chats` adds `organization_chats`. Its downgrade drops that table and every registered group.
+Revision `0006_session_publications` adds `session_publications`. It alters no existing table. Its downgrade drops the attempt history; session status stays unchanged.
 
 Revision `0003_candidate_rejected` adds the `candidate_rejected` unresolved reason. It copies the `unresolved_matches` table and keeps every row. Its downgrade changes those rows to `no_match`.
 An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
@@ -196,7 +198,19 @@ The sender must also be the creator or an administrator of the group, and must n
 One organization can register several groups. A group belongs to one organization only. Channels are not supported.
 The bot follows a group upgrade to a supergroup and keeps the registration.
 
-The bot posts no attendance poll yet. Publication and responses come in the next steps of this phase.
+## Publish a poll
+
+An admin sends `/publish` in a private chat with the bot. The bot lists Draft sessions in pages of 10.
+The admin selects a session, then a registered group, then reviews the poll text and taps Publish.
+The poll shows the series, the date or label, and the local deadline. It shows no counts.
+A success opens the session. A Telegram rejection marks the attempt failed. Send `/publish` again to retry.
+
+A timeout leaves the result unknown. The bot then asks the admin to look at the group.
+"I can see the poll" opens the session. The bot cannot edit or close that poll message later.
+"I can't see the poll" marks the attempt failed, and a retry is allowed.
+At startup, the bot marks an attempt that a crash interrupted as unknown.
+
+The poll buttons do nothing yet. Responses come in the next step of this phase. Do not deploy this step alone.
 Admin resolution of unresolved identity matches remains necessary before a real rollout.
 
 ## Docker Compose

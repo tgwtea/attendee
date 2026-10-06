@@ -18,6 +18,8 @@ from telegram.ext import (
 from attendee.telegram import onboarding, uploads
 from attendee.telegram.attendance import CALLBACK_PATTERN, AttendanceHandlers
 from attendee.telegram.chats import ChatHandlers
+from attendee.telegram.publication import CALLBACK_PATTERN as PUBLISH_PATTERN
+from attendee.telegram.publication import PublicationHandlers
 
 # These dictionaries match the library defaults. Attendance state lives in its handlers.
 type BotApplication = Application[
@@ -32,6 +34,7 @@ def bot_handlers(
     admins: uploads.UploadHandlers,
     attendance: AttendanceHandlers,
     chats: ChatHandlers,
+    publication: PublicationHandlers,
 ) -> list[BotHandler]:
     """Private chat handlers, plus group registration and group upgrades."""
     private = filters.ChatType.PRIVATE
@@ -44,6 +47,8 @@ def bot_handlers(
         CallbackQueryHandler(admins.button, pattern=uploads.CALLBACK_PATTERN),
         CommandHandler("register", chats.register, filters=filters.ChatType.GROUPS),
         MessageHandler(filters.StatusUpdate.MIGRATE, chats.migrate),
+        CommandHandler("publish", publication.start, filters=private),
+        CallbackQueryHandler(publication.button, pattern=PUBLISH_PATTERN),
     ]
 
 

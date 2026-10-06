@@ -97,6 +97,7 @@ The bot handles private chats, plus `/register` and upgrade messages in groups. 
 | `UploadHandlers.button` | `i:a:<token>`, `i:c:<token>` | `AuthorizationService.require_role`, `ImportService.apply` |
 | `ChatHandlers.register` | Group `/register` | `IdentityService`, `getChatMember`, `ChatRegistrationService.register` |
 | `ChatHandlers.migrate` | Group upgrade service messages | `ChatRegistrationService.migrate` |
+| `PublicationHandlers` | Private `/publish` and `p:` callbacks | `PublicationService`, identity, and authorization |
 
 - A member sees the candidate name only. The bot never shows another member's handle, Telegram ID, or an unresolved reason.
 - No match, an ambiguous match, a taken Telegram ID, and a rejection all show the PRD §34 "User not found" text.
@@ -157,7 +158,7 @@ Updates remain sequential. Existing `/start` and upload handlers remain availabl
 Stored status values are `draft`, `open`, and `closed`. This phase creates only `draft`.
 The service derives `Deadline Passed` when an Open session has a deadline earlier than the read time.
 Draft and Closed sessions retain their display status. Reads never write a status change.
-Tests use Open fixtures. This phase adds no publication or status transition operation.
+Publication (below) is the only operation that changes `draft` to `open`.
 
 [ACE LOGIC]
 Every attendance series belongs to an organization.
@@ -189,6 +190,36 @@ If a person sends a registration command and the person is not an administrator 
 If a person sends a registration command and the person is not an administrator of the group then the bot registers no group.
 If a sender is anonymous then the bot registers no group.
 If an organization owns a group then no other organization registers the group.
+
+## Poll publication (implemented)
+
+`domain/publication.py` defines the attempt states, the 2-minute lease, and the PRD §12 poll text.
+`application/publication.py` supplies `PublicationService` and the `Publisher` protocol.
+`repositories/publication.py` holds the attempt queries. `telegram/publication.py` holds the `/publish` flow and `TelegramPublisher`.
+
+| Table | Purpose and constraints |
+| --- | --- |
+| `session_publications` | Organization, session, registered group, state, requesting admin, lease expiry, Telegram message ID, failure class name, resolving admin, UTC times |
+
+A partial unique index allows one `publishing`, `publish_unknown`, or `published` attempt per session.
+Composite foreign keys keep the session, the group, and both admins in one organization.
+
+1. Transaction 1 uses `write_session()`. It checks the admin role, the Draft status, and the group. It moves an expired attempt of this session to `publish_unknown`. If an active attempt exists, it returns that state and sends nothing. Otherwise it inserts a `publishing` attempt with a lease.
+2. The service calls `Publisher.send_poll` outside any transaction. Only the request whose insert won reaches this step.
+3. Transaction 2 records the result. A success sets `published`, stores the message ID, and opens the session. A rejection sets `failed`. An unknown result sets `publish_unknown`.
+
+`TelegramPublisher` maps errors. `BadRequest` comes first, because it is a subclass of `NetworkError`.
+Other `TelegramError` classes are definite answers and set `failed`. `TimedOut` and `NetworkError` set `publish_unknown`.
+An admin resolves `publish_unknown` from `/publish`. "I can see the poll" opens the session without a message ID. "I can't see the poll" sets `failed`.
+At startup, `main.recover_publications` moves every expired `publishing` attempt to `publish_unknown`. No scheduler exists (T8).
+Updates stay sequential (`concurrent_updates(False)`), so a send blocks other updates for at most the Telegram timeout.
+
+[ACE LOGIC]
+If a request inserts a publishing attempt for a session then the request sends the poll.
+If a session has an active attempt then no other request sends a poll for the session.
+If Telegram rejects a send then the attempt is failed and the session remains a draft.
+If a send times out then the attempt is publish_unknown and an administrator resolves the attempt.
+If an attempt is published then the session is open.
 
 ## Future organization model
 
@@ -242,6 +273,7 @@ Alembic owns schema changes. Its async environment imports the project metadata 
 `alembic/env.py` imports `attendee.persistence.models` before it reads the metadata.
 Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revision `0003_candidate_rejected` adds the `candidate_rejected` reason.
 Revision `0004_attendance` adds the three attendance tables without seed data. Its downgrade drops only those tables and their data.
+Revision `0005_organization_chats` adds `organization_chats`. Revision `0006_session_publications` adds `session_publications` and alters no existing table.
 Revisions use plain SQLAlchemy types.
 `write_session()` starts a transaction with `BEGIN IMMEDIATE`. Use it for an operation that reads and then writes.
 SQLite stores timestamps as naive UTC. The `UTCDateTime` column type rejects naive input and returns aware UTC values.

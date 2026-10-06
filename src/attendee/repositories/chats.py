@@ -36,3 +36,19 @@ class ChatRepository:
         self.session.add(chat)
         await self.session.flush()
         return chat
+
+    async def get(self, chat_id: int) -> OrganizationChat | None:
+        return await self.session.scalar(
+            select(OrganizationChat).where(
+                OrganizationChat.organization_id == self.organization_id,
+                OrganizationChat.id == chat_id,
+            )
+        )
+
+    async def all(self) -> list[OrganizationChat]:
+        rows = await self.session.scalars(
+            select(OrganizationChat)
+            .where(OrganizationChat.organization_id == self.organization_id)
+            .order_by(OrganizationChat.title, OrganizationChat.id)
+        )
+        return list(rows)

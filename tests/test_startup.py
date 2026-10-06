@@ -26,7 +26,11 @@ def organization_found(monkeypatch):
     async def load(_factory, slug):
         return OrganizationDTO(id=1, slug=slug, name="Club", created_at="2026-10-04T00:00:00Z")
 
+    async def recover(_factory, _organization_id):
+        return 0
+
     monkeypatch.setattr("attendee.main.load_organization", load)
+    monkeypatch.setattr("attendee.main.recover_publications", recover)
 
 
 def test_registered_handlers():
@@ -41,6 +45,8 @@ def test_registered_handlers():
         "CallbackQueryHandler",
         "CommandHandler",
         "MessageHandler",
+        "CommandHandler",
+        "CallbackQueryHandler",
     ]
 
 
@@ -62,6 +68,25 @@ def test_shutdown_disposes_engine(monkeypatch, organization_found):
     run(bot_settings())
     engine.dispose.assert_awaited_once()
     application.run_polling.assert_called_once_with(close_loop=False, bootstrap_retries=0)
+
+
+def test_recovery_runs_before_polling(monkeypatch, organization_found):
+    order = []
+
+    async def recover(_factory, organization_id):
+        order.append(("recover", organization_id))
+        return 1
+
+    application = Mock()
+    application.run_polling.side_effect = lambda **_: order.append(("poll", None))
+    engine = Mock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr("attendee.main.recover_publications", recover)
+    monkeypatch.setattr("attendee.main.create_engine", lambda _: engine)
+    monkeypatch.setattr("attendee.main.create_session_factory", lambda _: Mock())
+    monkeypatch.setattr("attendee.main.build_application", lambda *_: application)
+    run(bot_settings())
+    assert order == [("recover", 1), ("poll", None)]
 
 
 def test_startup_failure_disposes_engine(monkeypatch, organization_found):

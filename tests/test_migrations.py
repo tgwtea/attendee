@@ -9,7 +9,10 @@ from conftest import ROOT, run_alembic
 ATTENDANCE_TABLES = {"attendance_series", "attendance_sessions", "session_roster_entries"}
 IDENTITY_TABLES = {"organizations", "people", "memberships", "unresolved_matches"}
 CHAT_TABLES = {"organization_chats"}
-HEAD_TABLES = IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {"alembic_version"}
+PUBLICATION_TABLES = {"session_publications"}
+HEAD_TABLES = (
+    IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | PUBLICATION_TABLES | {"alembic_version"}
+)
 
 
 def tables(database):
@@ -23,13 +26,11 @@ def test_fresh_and_repeated_upgrade(tmp_path):
     for _ in range(2):
         result = run_alembic(database, "upgrade", "head")
         assert result.returncode == 0, result.stderr
-    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {
-        "alembic_version"
-    }
+    assert tables(database) == HEAD_TABLES
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            ("0005_organization_chats",)
+            ("0006_session_publications",)
         ]
 
 
@@ -44,9 +45,7 @@ def test_upgrade_from_empty_foundation(tmp_path):
         connection.commit()
     result = run_alembic(database, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {
-        "alembic_version"
-    }
+    assert tables(database) == HEAD_TABLES
 
 
 def test_upgrade_from_identity_normalizes_handles(tmp_path):
@@ -61,9 +60,7 @@ def test_upgrade_from_identity_normalizes_handles(tmp_path):
         connection.commit()
     result = run_alembic(database, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {
-        "alembic_version"
-    }
+    assert tables(database) == HEAD_TABLES
     with closing(sqlite3.connect(database)) as connection:
         rows = connection.execute(
             "SELECT display_name, telegram_handle FROM people ORDER BY id"
@@ -92,7 +89,7 @@ def test_failed_revision_rolls_back_schema(tmp_path):
     (scripts / "versions" / "failure.py").write_text(
         "from alembic import op\n"
         'revision = "failure"\n'
-        'down_revision = "0005_organization_chats"\n'
+        'down_revision = "0006_session_publications"\n'
         "def upgrade():\n"
         '    op.execute("CREATE TABLE migration_probe (id INTEGER)")\n'
         '    raise RuntimeError("deliberate migration failure")\n'
@@ -251,5 +248,71 @@ def test_chat_upgrade_downgrade_preserves_attendance(tmp_path):
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("SELECT name FROM attendance_series").fetchall() == [
             ("Practice",)
+        ]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_publication_upgrade_downgrade_preserves_chats(tmp_path):
+    database = tmp_path / "publication-upgrade.db"
+    assert run_alembic(database, "upgrade", "0005_organization_chats").returncode == 0
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(
+            "INSERT INTO organizations (id,slug,name,created_at) "
+            "VALUES (1,'club','Club','2026-10-06 00:00:00'),"
+            "(2,'band','Band','2026-10-06 00:00:00');"
+            "INSERT INTO people (id,display_name,created_at,updated_at) "
+            "VALUES (1,'Admin','2026-10-06 00:00:00','2026-10-06 00:00:00');"
+            "INSERT INTO memberships (organization_id,person_id,role,created_at,updated_at) "
+            "VALUES (1,1,'admin','2026-10-06 00:00:00','2026-10-06 00:00:00'),"
+            "(2,1,'admin','2026-10-06 00:00:00','2026-10-06 00:00:00');"
+            "INSERT INTO attendance_series "
+            "(id,organization_id,name,normalized_name,created_by,created_at) "
+            "VALUES (1,1,'Practice','practice',1,'2026-10-06 00:00:00');"
+            "INSERT INTO attendance_sessions "
+            "(id,organization_id,series_id,session_date,deadline,status,"
+            "created_by,created_at,creation_key,request_fingerprint) "
+            "VALUES (1,1,1,'2026-10-13','2026-10-12 12:00:00','draft',1,"
+            "'2026-10-06 00:00:00','request-key','fingerprint');"
+            "INSERT INTO organization_chats (id,organization_id,telegram_chat_id,chat_type,title,"
+            "registered_by,registered_at,updated_at) "
+            "VALUES (1,1,-100,'supergroup','Samba',1,'2026-10-06 00:00:00','2026-10-06 00:00:00'),"
+            "(2,2,-200,'supergroup','Band',1,'2026-10-06 00:00:00','2026-10-06 00:00:00');"
+        )
+        connection.commit()
+    result = run_alembic(database, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    insert = (
+        "INSERT INTO session_publications (organization_id,session_id,organization_chat_id,"
+        "status,requested_by,lease_expires_at,telegram_message_id,created_at,updated_at) "
+        "VALUES (1,1,?,?,1,'2026-10-06 00:02:00',?,'2026-10-06 00:00:00','2026-10-06 00:00:00')"
+    )
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(insert, (1, "failed", None))
+        connection.execute(insert, (1, "failed", None))
+        connection.execute(insert, (1, "publishing", None))
+        # One publishing, publish_unknown, or published attempt per session.
+        for status in ("publishing", "publish_unknown", "published"):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(insert, (1, status, None))
+        # A group of another organization, an unknown status, a message ID before success.
+        for values in ((2, "failed", None), (1, "sent", None), (1, "failed", 7)):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(insert, values)
+        connection.commit()
+    assert run_alembic(database, "check").returncode == 0
+    result = run_alembic(database, "downgrade", "0005_organization_chats")
+    assert result.returncode == 0, result.stderr
+    assert tables(database) == HEAD_TABLES - PUBLICATION_TABLES
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute(
+            "SELECT title FROM organization_chats ORDER BY id"
+        ).fetchall() == [
+            ("Samba",),
+            ("Band",),
+        ]
+        assert connection.execute("SELECT status FROM attendance_sessions").fetchall() == [
+            ("draft",)
         ]
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

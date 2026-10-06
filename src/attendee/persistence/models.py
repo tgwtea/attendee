@@ -1,4 +1,4 @@
-"""ORM records for organization identity, unresolved matches, chats, and attendance."""
+"""ORM records for organization identity, unresolved matches, chats, attendance, and publication."""
 
 from datetime import date, datetime
 
@@ -9,8 +9,10 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -219,3 +221,61 @@ class SessionRosterEntry(Base):
     organization_id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[int] = mapped_column(primary_key=True)
     person_id: Mapped[int] = mapped_column(primary_key=True)
+
+
+class SessionPublication(Base):
+    """One attempt to post a session poll to a registered group (decision T55).
+
+    A partial unique index allows one publishing, publish_unknown, or published row per session.
+    Failed rows stay as history, so a retry inserts a new row.
+    """
+
+    __tablename__ = "session_publications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('publishing', 'published', 'publish_unknown', 'failed')",
+            name="valid_publication_status",
+        ),
+        CheckConstraint(
+            "telegram_message_id IS NULL OR status = 'published'", name="message_only_published"
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "session_id"],
+            ["attendance_sessions.organization_id", "attendance_sessions.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "organization_chat_id"],
+            ["organization_chats.organization_id", "organization_chats.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "requested_by"],
+            ["memberships.organization_id", "memberships.person_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "resolved_by"],
+            ["memberships.organization_id", "memberships.person_id"],
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "uq_session_publications_active",
+            "session_id",
+            unique=True,
+            sqlite_where=text("status IN ('publishing', 'publish_unknown', 'published')"),
+        ),
+        Index("ix_session_publications_lease", "status", "lease_expires_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int]
+    session_id: Mapped[int]
+    organization_chat_id: Mapped[int]
+    status: Mapped[str] = mapped_column(String(20))
+    requested_by: Mapped[int]
+    lease_expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    failure: Mapped[str | None] = mapped_column(String(64))
+    resolved_by: Mapped[int | None]
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)

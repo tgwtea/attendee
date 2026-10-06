@@ -45,6 +45,38 @@ REGISTER_REFRESHED = "This group is already registered for attendance polls."
 REGISTER_TAKEN = "Another organization already registered this group."
 
 
+PUBLISH_DENIED = "Only an admin of this organization can publish attendance."
+PUBLISH_EXPIRED = "This button expired. Send /publish again."
+PUBLISH_NO_DRAFTS = "No Draft session waits for publication. Create one with /attendance."
+PUBLISH_NO_GROUPS = "Register a group with /register first."
+PUBLISH_SELECT_SESSION = "Select a Draft session to publish."
+PUBLISH_SELECT_GROUP = "Select the group for this poll."
+PUBLISH_CONFIRM = "Publish this poll?"
+PUBLISH_IN_PROGRESS = "This poll is being published. Send /publish again in 2 minutes."
+PUBLISH_UNKNOWN = (
+    "The bot does not know if the poll reached the group. "
+    "Look at the group, then tell the bot what you see."
+)
+PUBLISH_DONE = "The poll is in the group. The session is now Open."
+PUBLISH_DONE_NO_EDIT = (
+    "The session is now Open. The bot cannot edit or close the poll message that you see."
+)
+PUBLISH_FAILED = (
+    "Telegram rejected the poll ({failure}). Nothing was posted. Send /publish to retry."
+)
+PUBLISH_NOT_SEEN = "The attempt is marked failed. Send /publish to retry."
+PUBLISH_DB_FAILED = "The publication failed. Send /publish to try again."
+PUBLISH_CANCELLED = "Cancelled. Nothing was published."
+I_SEE_POLL = "I can see the poll"
+I_CANT_SEE_POLL = "I can't see the poll"
+PUBLISH = "Publish"
+PREVIOUS = "Previous"
+NEXT = "Next"
+
+# PRD §12 poll buttons. Their callback handler arrives with responses (phase 5 step 3).
+POLL_BUTTONS = (("Coming", "c"), ("Not Coming", "n"), ("Late", "l"), ("Leaving Early", "e"))
+
+
 def confirm_name(name: str) -> str:
     return f"Are you {name}?"
 

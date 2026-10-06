@@ -151,6 +151,6 @@ The identity phase adds organizations, people, memberships, roles, authorization
 The import phase adds namelist import (`attendee-import`), Telegram account matching, and unresolved matches.
 The onboarding phase adds `/start` account matching with name confirmation and namelist upload through Telegram.
 The attendance phase adds series, Draft sessions, fixed roster snapshots, and private `/attendance` creation.
-The publication phase adds group `/register` (several groups per organization, no channels).
-Publication and responses are in progress. Reminders, closure, calculations, and exports remain deferred.
+The publication phase adds group `/register` (several groups per organization, no channels) and private `/publish`
+with safe publish attempts (T55–T61). Responses are in progress. Reminders, closure, calculations, and exports remain deferred.
 Document future concepts without speculative feature code.

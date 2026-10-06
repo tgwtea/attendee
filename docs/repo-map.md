@@ -28,7 +28,8 @@ Update this file when the repository structure changes.
 │       ├── 0002_import_matching.py
 │       ├── 0003_candidate_rejected.py
 │       ├── 0004_attendance.py
-│       └── 0005_organization_chats.py
+│       ├── 0005_organization_chats.py
+│       └── 0006_session_publications.py
 ├── scripts/entrypoint.sh
 ├── src/attendee/
 │   ├── __init__.py
@@ -47,6 +48,7 @@ Update this file when the repository structure changes.
 │   │   ├── attendance.py
 │   │   ├── chats.py
 │   │   ├── onboarding.py
+│   │   ├── publication.py
 │   │   └── uploads.py
 │   ├── persistence/
 │   │   ├── __init__.py
@@ -67,20 +69,23 @@ Update this file when the repository structure changes.
 │   │   ├── bootstrap.py
 │   │   ├── import_files.py
 │   │   ├── imports.py
-│   │   └── matching.py
+│   │   ├── matching.py
+│   │   └── publication.py
 │   ├── domain/
 │   │   ├── __init__.py
 │   │   ├── identity.py
 │   │   ├── attendance.py
 │   │   ├── chats.py
 │   │   ├── imports.py
-│   │   └── matching.py
+│   │   ├── matching.py
+│   │   └── publication.py
 │   ├── repositories/
 │   │   ├── __init__.py
 │   │   ├── identity.py
 │   │   ├── attendance.py
 │   │   ├── chats.py
-│   │   └── matching.py
+│   │   ├── matching.py
+│   │   └── publication.py
 │   └── reporting/
 │       ├── __init__.py
 │       └── imports.py
@@ -98,6 +103,7 @@ Update this file when the repository structure changes.
 │   ├── test_attendance.py
 │   ├── test_attendance_conversation.py
 │   ├── test_chats.py
+│   ├── test_publication.py
 │   ├── test_onboarding.py
 │   ├── test_uploads.py
 │   └── telegram_fakes.py
@@ -120,7 +126,7 @@ Update this file when the repository structure changes.
 | `.env.example`, `.gitignore`, `.dockerignore` | Example settings and local/build exclusions |
 | `.github/workflows/ci.yml` | Automated dependency, lint, format, type, and test checks |
 | `Dockerfile`, `compose.yaml`, `scripts/entrypoint.sh` | Container build, persistent volume, and migration-first startup |
-| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, `0003_candidate_rejected`, `0004_attendance`, and `0005_organization_chats` revisions |
+| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, `0003_candidate_rejected`, `0004_attendance`, `0005_organization_chats`, and `0006_session_publications` revisions |
 | `src/attendee/main.py` | Explicit dependency construction and bot lifecycle |
 | `src/attendee/config/` | Validated environment settings |
 | `src/attendee/logging.py` | Standard logs with token redaction |

@@ -14,6 +14,7 @@ from attendee.application.identity import IdentityService
 from attendee.application.imports import ImportService
 from attendee.application.matching import AccountMatchingService
 from attendee.application.organizations import OrganizationService
+from attendee.application.publication import PublicationService
 from attendee.config.settings import ConfigurationError, Settings
 from attendee.logging import configure_logging
 from attendee.persistence.database import create_engine, create_session_factory
@@ -21,6 +22,7 @@ from attendee.telegram.attendance import AttendanceHandlers
 from attendee.telegram.bootstrap import BotHandler, bot_handlers, build_application
 from attendee.telegram.chats import ChatHandlers
 from attendee.telegram.onboarding import OnboardingHandlers
+from attendee.telegram.publication import PublicationHandlers
 from attendee.telegram.uploads import UploadHandlers
 
 
@@ -34,6 +36,13 @@ async def load_organization(
             f"No organization has the slug {slug!r}. Run attendee-setup first."
         )
     return organization
+
+
+async def recover_publications(
+    session_factory: async_sessionmaker[AsyncSession], organization_id: int
+) -> int:
+    """Startup hook. An attempt that a crash left publishing becomes publish_unknown."""
+    return await PublicationService(session_factory).recover_expired(organization_id)
 
 
 def create_handlers(
@@ -63,6 +72,12 @@ def create_handlers(
             IdentityService(session_factory),
             ChatRegistrationService(session_factory),
         ),
+        PublicationHandlers(
+            organization_id,
+            IdentityService(session_factory),
+            AuthorizationService(session_factory),
+            PublicationService(session_factory, timezone),
+        ),
     )
 
 
@@ -75,6 +90,11 @@ def run(settings: Settings) -> None:
         session_factory = create_session_factory(engine)
         try:
             organization = runner.run(load_organization(session_factory, slug))
+            recovered = runner.run(recover_publications(session_factory, organization.id))
+            if recovered:
+                logging.getLogger(__name__).warning(
+                    "%d interrupted publication(s) need an admin decision in /publish", recovered
+                )
             application = build_application(
                 token, create_handlers(session_factory, organization.id, settings.app_timezone)
             )
