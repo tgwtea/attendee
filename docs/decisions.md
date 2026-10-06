@@ -173,3 +173,18 @@ Learner decisions on 2026-10-07. Sub-step 2 implements T88–T90. They update T3
   for that group, for example after a restart, links the account and asks the member to tap again. A poll that closed
   before Yes still links the account and then replies "poll closed". The Yes and No handler moved from onboarding to
   `ResponseHandlers.link_answer`. A private `/start` without a payload links nothing (T80).
+
+### Production review repairs (2026-10-07)
+
+- T91: Each XLSX import permits at most 10 MiB of expanded archive data across all entries.
+  The existing 5 MiB upload limit remains. Each CSV or first XLSX worksheet permits 1,000 rows plus a header and 20 columns.
+  Blank rows count toward the limit. Archive validation precedes workbook parsing.
+  The parser checks declared dimensions and actual rows. These limits apply per file, not per month or group.
+  The user accepted these defaults for groups of about 80 members.
+- T92: A successful response clears every pending reason prompt for that member, group, and session.
+  Other sessions keep their prompts and pending state. Response confirmations have separate state for each member and session.
+  This updates T68 and T78. The latest-tap links in T64 and T88 still select the prompt to open.
+- T93: Every response check reads the stored group activity flag. Every response write repeats that check inside its transaction.
+  An inactive or missing group rejects the response. Telegram membership updates maintain the flag under T84.
+  The user selected this stored check instead of a Telegram request before every save.
+  A delayed membership update can leave the stored flag temporarily stale. This changes no member membership rule.

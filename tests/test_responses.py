@@ -489,3 +489,87 @@ async def test_unrelated_text_does_not_save_reason(handlers, open_session, sessi
     await handlers.reason(message_update(MEMBER_TG, "sarah", text="New series name"), bot_context())
     assert await current(session_factory) == []
     assert handlers.pending
+
+
+async def open_reason_prompt(handlers, session_id, code):
+    await handlers.tap(group_tap(session_id, code), bot_context())
+    await handlers.start(message_update(MEMBER_TG, "sarah", text="/start reason"), bot_context())
+    return list(handlers.prompts)[-1][1]
+
+
+async def answer_prompt(handlers, prompt_id, text):
+    update = message_update(MEMBER_TG, "sarah", text=text)
+    update.effective_message.reply_to_message = SimpleNamespace(message_id=prompt_id)
+    await handlers.reason(update, bot_context())
+    return update
+
+
+async def test_success_invalidates_older_prompts_for_same_session(
+    handlers, open_session, session_factory
+):
+    _, draft = open_session
+    old = await open_reason_prompt(handlers, draft.id, "l")
+    new = await open_reason_prompt(handlers, draft.id, "n")
+    await answer_prompt(handlers, new, "Overseas")
+    assert await current(session_factory) == [("not_coming", "Overseas")]
+    assert (MEMBER_TG, old) not in handlers.prompts
+    await answer_prompt(handlers, old, "Old reason")
+    assert await current(session_factory) == [("not_coming", "Overseas")]
+    assert len(await events(session_factory)) == 1
+
+
+async def test_coming_keeps_other_session_prompt_and_pending(
+    handlers, open_session, attendance_club, session_factory
+):
+    _, first = open_session
+    second = await create(attendance_club, series_id=first.series_id, new_series_name=None)
+    await set_status(session_factory, second.id, SessionStatus.OPEN)
+    prompt_id = await open_reason_prompt(handlers, first.id, "l")
+    await handlers.tap(group_tap(second.id, "c"), bot_context())
+    assert handlers.pending[MEMBER_TG].session_id == first.id
+    assert (MEMBER_TG, prompt_id) in handlers.prompts
+    await answer_prompt(handlers, prompt_id, "Class")
+    async with session_factory() as session:
+        saved = await session.scalars(select(SessionResponse))
+        assert {(row.session_id, row.status, row.reason) for row in saved} == {
+            (first.id, "late", "Class"),
+            (second.id, "coming", None),
+        }
+
+
+async def test_confirmation_survives_a_tap_on_another_session(
+    handlers, open_session, attendance_club, session_factory
+):
+    _, first = open_session
+    second = await create(attendance_club, series_id=first.series_id, new_series_name=None)
+    await set_status(session_factory, second.id, SessionStatus.OPEN)
+    await handlers.tap(group_tap(first.id, "c"), bot_context())
+    await handlers.tap(group_tap(first.id, "l"), bot_context())
+    await handlers.tap(group_tap(second.id, "c"), bot_context())
+    confirmation = group_tap(first.id, "l")
+    await handlers.tap(confirmation, bot_context())
+    confirmation.callback_query.answer.assert_awaited_once_with(
+        url="https://t.me/attendee_bot?start=reason"
+    )
+
+
+async def test_inactive_group_rejects_prompt_reply_and_direct_write(
+    handlers, open_session, session_factory
+):
+    group, draft = open_session
+    prompt_id = await open_reason_prompt(handlers, draft.id, "l")
+    await GroupService(session_factory).left(group.telegram_chat_id)
+    answer = await answer_prompt(handlers, prompt_id, "Class")
+    assert replies(answer) == [(messages.POLL_CLOSED, None)]
+    with pytest.raises(SessionNotOpen):
+        await ResponseService(session_factory).record(
+            group.id, MEMBER_TG, draft.id, ResponseStatus.COMING
+        )
+    tap = group_tap(draft.id, "c")
+    await handlers.tap(tap, bot_context())
+    tap.callback_query.answer.assert_awaited_once_with(messages.POLL_CLOSED, show_alert=True)
+    assert await current(session_factory) == []
+    assert await events(session_factory) == []
+    await GroupService(session_factory).joined(group.telegram_chat_id, group.chat_type, group.title)
+    await handlers.tap(group_tap(draft.id, "c"), bot_context())
+    assert await current(session_factory) == [("coming", None)]

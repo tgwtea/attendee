@@ -714,6 +714,9 @@ After the poll is closed, only admins should be able to change records.
 
 **Clarification (2026-10-06):** A member with a saved response confirms a change first. The first tap on a different button shows a private pop-up, for example "You already said Coming. Tap Late again within 60 seconds to change your answer." Only a second tap of that button within 60 seconds continues.
 
+**Clarification (2026-10-07):** A successful response invalidates every older reason prompt for that member and session.
+Other sessions keep their prompts and confirmation state, including sessions in other groups.
+
 ---
 
 # 24. Reminders

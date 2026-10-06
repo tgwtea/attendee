@@ -118,7 +118,7 @@ class ResponseHandlers:
         self.has_pending = HasPendingReason(self.prompts)
         self.callbacks: OrderedDict[str, None] = OrderedDict()
         # Memory only, like `pending`. A restart forgets an armed change.
-        self.armed: dict[int, ArmedChange] = {}
+        self.armed: dict[tuple[int, int], ArmedChange] = {}
 
     def _needs_confirmation(
         self,
@@ -129,7 +129,8 @@ class ResponseHandlers:
         callback_id: str,
     ) -> bool:
         """Arm on the first tap that changes a saved status. A second tap in time disarms."""
-        armed = self.armed.pop(user_id, None)
+        key = (user_id, session_id)
+        armed = self.armed.pop(key, None)
         if current is None or current is status:
             return False
         now = self.clock()
@@ -141,7 +142,7 @@ class ResponseHandlers:
             and now < armed.expires_at
         ):
             return False
-        self.armed[user_id] = ArmedChange(session_id, status, now + CONFIRM_SECONDS, callback_id)
+        self.armed[key] = ArmedChange(session_id, status, now + CONFIRM_SECONDS, callback_id)
         return True
 
     async def tap(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -168,7 +169,7 @@ class ResponseHandlers:
                 if query.message is None
                 else await self.groups.by_telegram_id(query.message.chat.id)
             )
-            if group is None:
+            if group is None or not group.active:
                 raise SessionNotOpen
             target = await self.responses.check(group.id, user_id, session_id)
             if self._needs_confirmation(
@@ -185,10 +186,9 @@ class ResponseHandlers:
                 )
                 return
             if status is ResponseStatus.COMING:
-                # A Coming tap replaces any pending non-Coming tap.
+                # Clear state for this session only after the database commit.
                 await self.responses.record(group.id, user_id, session_id, status)
-                self.pending.pop(user_id, None)
-                self._clear_prompts(user_id)
+                self._clear_session(user_id, group.id, session_id)
                 await query.answer(messages.RECORDED.format(status=status.label), show_alert=True)
                 return
         except NotLinked:
@@ -289,6 +289,7 @@ class ResponseHandlers:
         try:
             if kept.status is ResponseStatus.COMING:
                 await self.responses.record(kept.group_id, user_id, kept.session_id, kept.status)
+                self._clear_session(user_id, kept.group_id, kept.session_id)
                 await bot.send_message(user_id, messages.RECORDED.format(status=kept.status.label))
                 return
             target = await self.responses.check(kept.group_id, user_id, kept.session_id)
@@ -363,7 +364,7 @@ class ResponseHandlers:
             logging.getLogger(__name__).error("Response database operation failed")
             await self._prompt(message, user.id, pending, messages.REASON_NOT_SAVED)
             return
-        self._drop(user.id, pending)
+        self._clear_session(user.id, pending.group_id, pending.session_id)
         await message.reply_text(
             messages.RECORDED_REASON.format(status=result.status.label, reason=result.reason)
         )
@@ -374,10 +375,19 @@ class ResponseHandlers:
         prompt = await message.reply_text(text, reply_markup=ForceReply(selective=True))
         self.prompts[user_id, prompt.message_id] = pending
 
-    def _clear_prompts(self, user_id: int) -> None:
-        for key in list(self.prompts):
-            if key[0] == user_id:
+    def _clear_session(self, user_id: int, group_id: int, session_id: int) -> None:
+        """Invalidate all old prompts for the saved session. Other sessions keep their state."""
+        for key, target in list(self.prompts.items()):
+            if key[0] == user_id and (target.group_id, target.session_id) == (group_id, session_id):
                 del self.prompts[key]
+        for pending in (self.pending, self.links):
+            target = pending.get(user_id)
+            if target is not None and (target.group_id, target.session_id) == (
+                group_id,
+                session_id,
+            ):
+                del pending[user_id]
+        self.armed.pop((user_id, session_id), None)
 
     def _drop(self, user_id: int, pending: PendingReason) -> None:
         """Remove this pending tap only. A newer tap stays."""

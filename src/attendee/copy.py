@@ -91,6 +91,10 @@ FILE_NOT_UTF8 = "please save the CSV file as UTF-8"
 FILE_BAD_CSV = "the CSV file is not valid ({detail})"
 FILE_BAD_XLSX = "the XLSX file is not valid"
 FILE_TOO_LARGE = "the file is over {megabytes} MB"
+FILE_EXPANDED_TOO_LARGE = (
+    "the expanded XLSX file exceeds 10 MiB; remove unused sheets and formatting"
+)
+FILE_TABLE_TOO_LARGE = "the table exceeds 1,000 member rows plus a header, or 20 columns"
 FILE_EMPTY = "the file is empty"
 FILE_NO_ROWS = "the file has no member rows"
 FILE_DUPLICATE_COLUMN = "the column {column!r} appears more than once"

@@ -15,6 +15,7 @@ from attendee.domain.responses import ResponseStatus, clean_reason
 from attendee.persistence.database import write_session
 from attendee.persistence.models import AttendanceSession, SessionResponse, SessionResponseEvent
 from attendee.repositories.attendance import AttendanceRepository
+from attendee.repositories.groups import GroupRepository
 from attendee.repositories.identity import PersonRepository
 from attendee.repositories.responses import ResponseRepository
 
@@ -62,6 +63,9 @@ class ResponseService:
         session_id: int,
         now: datetime,
     ) -> tuple[int, AttendanceSession, ResponseTarget]:
+        group = await GroupRepository(session).get(group_id)
+        if group is None or not group.active:
+            raise SessionNotOpen
         person = await PersonRepository(session, group_id).get_by_telegram_user_id(telegram_user_id)
         if person is None:
             raise NotLinked

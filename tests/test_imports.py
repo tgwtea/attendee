@@ -265,3 +265,62 @@ def test_import_command_previews_then_applies(migrated_settings, tmp_path, monke
     with pytest.raises(SystemExit) as exit_info:
         main(["--chat-id", "-999", str(path)])
     assert exit_info.value.code == 1
+
+
+def rewrite_xlsx(data, transform):
+    import zipfile
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+            for name in source.namelist():
+                target.writestr(name, transform(name, source.read(name)))
+    return output.getvalue()
+
+
+def test_expanded_archive_limit_precedes_workbook_load(monkeypatch):
+    import zipfile
+
+    from attendee.application import import_files
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("large.xml", b"x" * (import_files.MAX_EXPANDED_BYTES + 1))
+    assert len(output.getvalue()) < import_files.MAX_FILE_BYTES
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("An oversized archive reached the workbook loader")
+
+    monkeypatch.setattr(import_files, "load_workbook", unexpected_load)
+    with pytest.raises(ImportFileError, match="expanded XLSX"):
+        parse_xlsx(output.getvalue())
+
+
+@pytest.mark.parametrize("parser,encode", [(parse_csv, csv_bytes), (parse_xlsx, xlsx_bytes)])
+def test_import_table_size_boundaries(parser, encode):
+    rows = [[f"Member {i}", f"member{i:04}"] for i in range(1000)]
+    header = [*HEADER, *(f"Extra {i}" for i in range(18))]
+    assert len(parser(encode(rows, header)).rows) == 1000
+    with pytest.raises(ImportFileError, match="1,000 member rows"):
+        parser(encode([*rows, ["Extra", "extra_member"]], header))
+    with pytest.raises(ImportFileError, match="20 columns"):
+        parser(encode(rows[:1], [*header, "Overflow"]))
+
+
+@pytest.mark.parametrize("coordinate", ["A1002", "U2"])
+def test_understated_xlsx_dimensions_cannot_hide_excess_cells(coordinate):
+    import re
+
+    data = xlsx_bytes(NAMELIST)
+
+    def transform(name, content):
+        if name != "xl/worksheets/sheet1.xml":
+            return content
+        content = re.sub(rb'<dimension ref="[^"]+"', b'<dimension ref="A1:B1"', content)
+        row = "1002" if coordinate == "A1002" else "5"
+        cell = coordinate if coordinate == "A1002" else "U5"
+        extra = f'<row r="{row}"><c r="{cell}" t="n"><v>1</v></c></row>'
+        return content.replace(b"</sheetData>", extra.encode() + b"</sheetData>")
+
+    with pytest.raises(ImportFileError, match="table exceeds"):
+        parse_xlsx(rewrite_xlsx(data, transform))
