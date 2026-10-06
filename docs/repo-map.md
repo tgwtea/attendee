@@ -145,4 +145,4 @@ Update this file when the repository structure changes.
 | `tests/` | Tests with temporary migrated databases and fake Telegram updates; no live Telegram account |
 
 Local `.venv/`, `.env`, caches, and `data/` are ignored. Docker stores runtime data in a named volume.
-Groups, Draft attendance creation, publication, responses, and `/stats` with XLSX export exist. Linking from a poll tap, admin `/help`, reminders, and closure remain deferred.
+Groups, Draft attendance creation, publication, responses with linking from a poll tap, and `/stats` with XLSX export exist. Admin `/help`, reminders, and closure remain deferred.

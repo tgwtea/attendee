@@ -7,6 +7,7 @@ from attendee import copy
 # Every text with a placeholder, and the names that code passes to `.format()`.
 PLACEHOLDERS = {
     "CONFIRM_NAME": {"name"},
+    "LINK_NOT_FOUND": {"handle"},
     "UPLOAD_TOO_LARGE": {"megabytes"},
     "UPLOAD_UNREADABLE": {"error"},
     "PREVIEW_UNRESOLVED": {"count"},

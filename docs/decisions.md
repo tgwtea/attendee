@@ -29,7 +29,7 @@ The PRD sets these decisions. Change them only through a PRD change.
 ## Accepted technical decisions
 
 All entries below have status **Accepted**.
-T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**. T50–T79 date from **2026-10-06**. T80–T87 date from **2026-10-07**.
+T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**. T50–T79 date from **2026-10-06**. T80–T90 date from **2026-10-07**.
 The finalized MVP stack supplies these choices. Product behavior remains subject to the PRD.
 
 | ID | Choice | Reason and consequence |
@@ -156,3 +156,20 @@ Learner decisions on 2026-10-06 and 2026-10-07, confirmed as one design. Sub-ste
   before the bot starts. Delete that database and upgrade again.
 - T87: `created_by`, `requested_by`, and `resolved_by` store the Telegram user ID of the group admin, because the admin
   may not be on the namelist. A session publishes to its own group, so `session_publications` has no chat column.
+
+### Linking from a poll tap (2026-10-07)
+
+Learner decisions on 2026-10-07. Sub-step 2 implements T88–T90. They update T31, T34, and T64.
+
+- T88: An unlinked member's poll tap is kept in process memory, one per Telegram user ID, with its group, session,
+  and status. A new tap replaces it. A restart loses it. The tap answer opens `t.me/<bot>?start=link`. The fixed
+  payload `link` carries no data, so nobody can edit a claim into it.
+- T89: `/start link` matches the user's own Telegram username in the kept tap's group. The bot never asks a member to
+  type a username and never shows another member's data. One match asks "Are you <name>?" (T31). No match, two
+  matches, or no username drops the kept tap, records an unresolved match (T28), and tells the member to ask an admin
+  to add them. The text shows only the member's own username.
+- T90: Yes links the account and then saves the kept tap, so the member taps once only. Coming saves at once. Another
+  status gets the usual private reason prompt (T78). No links nothing and drops the kept tap. A Yes without a kept tap
+  for that group, for example after a restart, links the account and asks the member to tap again. A poll that closed
+  before Yes still links the account and then replies "poll closed". The Yes and No handler moved from onboarding to
+  `ResponseHandlers.link_answer`. A private `/start` without a payload links nothing (T80).

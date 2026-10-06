@@ -40,6 +40,7 @@ def test_registered_handlers():
         "ConversationHandler",
         "CallbackQueryHandler",
         "MessageHandler",
+        "MessageHandler",
         "CommandHandler",
         "CallbackQueryHandler",
         "MessageHandler",

@@ -12,6 +12,7 @@ from telegram_fakes import callback_update, message_update, replies
 from test_attendance import add_member, create
 
 from attendee.application.groups import GroupService
+from attendee.application.matching import AccountMatchingService
 from attendee.application.responses import (
     NotLinked,
     NotOnRoster,
@@ -181,7 +182,11 @@ def group_tap(session_id, code, telegram_user_id=MEMBER_TG):
 
 @pytest.fixture
 def handlers(open_session, session_factory):
-    return ResponseHandlers(GroupService(session_factory), ResponseService(session_factory))
+    return ResponseHandlers(
+        GroupService(session_factory),
+        ResponseService(session_factory),
+        AccountMatchingService(session_factory),
+    )
 
 
 async def test_coming_tap_records_with_private_popup(handlers, open_session, session_factory):
@@ -229,7 +234,8 @@ class FakeClock:
 def clocked(open_session, session_factory):
     clock = FakeClock()
     groups = GroupService(session_factory)
-    return ResponseHandlers(groups, ResponseService(session_factory), clock), clock
+    matching = AccountMatchingService(session_factory)
+    return ResponseHandlers(groups, ResponseService(session_factory), matching, clock), clock
 
 
 async def test_change_needs_second_tap(clocked, open_session, session_factory):
@@ -355,9 +361,6 @@ async def test_closed_between_tap_and_reason(handlers, open_session, session_fac
 
 async def test_tap_rejections_use_popups(handlers, open_session, session_factory):
     _, draft = open_session
-    unknown = group_tap(draft.id, "c", telegram_user_id=9999)
-    await handlers.tap(unknown, bot_context())
-    unknown.callback_query.answer.assert_awaited_once_with(messages.NOT_MATCHED, show_alert=True)
     invalid = callback_update(MEMBER_TG, "sarah", "v:bad", chat_id=-100, chat_type="supergroup")
     await handlers.tap(invalid, bot_context())
     invalid.callback_query.answer.assert_awaited_once_with(messages.VOTE_INVALID, show_alert=True)
@@ -428,6 +431,8 @@ def test_routing_sends_text_to_reason_only_with_pending_tap():
     assert first_handler(application, private_text("/attendance")) is not reason_handler
     start = first_handler(application, private_text("/start reason"))
     assert start.callback == responses.start
+    link = first_handler(application, private_text("/start link"))
+    assert link.callback == responses.link_start
     plain = first_handler(application, private_text("/start"))
     assert plain.callback != responses.start
 

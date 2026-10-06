@@ -46,12 +46,12 @@ def create_handlers(
     groups = GroupService(session_factory)
     matching = AccountMatchingService(session_factory)
     return bot_handlers(
-        OnboardingHandlers(matching),
+        OnboardingHandlers(),
         UploadHandlers(access, ImportService(session_factory), matching),
         AttendanceHandlers(access, AttendanceService(session_factory, access), timezone),
         GroupHandlers(groups),
         PublicationHandlers(access, PublicationService(session_factory, access, timezone)),
-        ResponseHandlers(groups, ResponseService(session_factory)),
+        ResponseHandlers(groups, ResponseService(session_factory), matching),
         StatsHandlers(access, ReportService(session_factory, access)),
     )
 

@@ -150,5 +150,5 @@ The accepted stack is in `docs/decisions.md`. Do not reopen those choices withou
 The group phase (T80–T87) replaced organizations, memberships, roles, `attendee-setup`, and `/register`.
 The bot learns a group when it joins. Revision `0001_groups` is the baseline.
 Implemented: namelist import, account matching with name confirmation, Draft sessions, safe publication, responses,
-and `/stats` with XLSX export. Not built: linking from a poll tap, admin `/help`, reminders, closure, custom fields.
+`/stats` with XLSX export, and linking from a poll tap. Not built: admin `/help`, reminders, closure, custom fields.
 Document future concepts without speculative feature code.

@@ -6,6 +6,9 @@ A response takes up to three updates: the tap, "/start reason", and the reason t
 The private prompt links the reason reply to its original pending tap (decision T78).
 The state lives in process memory, so a restart loses it and the member taps again.
 The group of a tap is the chat of the poll message, which Telegram fills (decision T80).
+
+An unlinked member's tap is kept, and the member confirms their name in the private chat.
+After Yes, the bot saves the kept tap, so the member taps once only (decisions T88–T90).
 """
 
 import logging
@@ -15,10 +18,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy.exc import SQLAlchemyError
-from telegram import ForceReply, Message, Update
+from telegram import Bot, CallbackQuery, ForceReply, Message, Update
 from telegram.ext import ContextTypes, filters
 
-from attendee.application.groups import GroupService
+from attendee.application.errors import NotFound
+from attendee.application.groups import GroupDTO, GroupService
+from attendee.application.matching import AccountMatchingService, MatchResult
 from attendee.application.responses import (
     NotLinked,
     NotOnRoster,
@@ -26,12 +31,16 @@ from attendee.application.responses import (
     ResponseTarget,
     SessionNotOpen,
 )
+from attendee.domain.matching import MatchOutcome
 from attendee.domain.responses import ReasonMissing, ReasonTooLong, ResponseStatus, parse_vote
 from attendee.telegram import messages
+from attendee.telegram.onboarding import edit_text, parse_match_callback, render
 
 CALLBACK_PATTERN = r"^v:"
 START_PAYLOAD = "reason"
 START_PATTERN = rf"^/start {START_PAYLOAD}$"
+LINK_PAYLOAD = "link"
+LINK_PATTERN = rf"^/start {LINK_PAYLOAD}$"
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,13 @@ def _denied_text(exc: NotLinked | NotOnRoster | SessionNotOpen) -> str:
     return messages.POLL_CLOSED
 
 
+def _not_found_text(username: str | None) -> str:
+    """Show only the user's own username. Two matches give the same text, with no names."""
+    if not username:
+        return messages.LINK_NO_USERNAME
+    return messages.LINK_NOT_FOUND.format(handle=username.removeprefix("@"))
+
+
 def _session_name(target: ResponseTarget) -> str:
     day = f"{target.session_date.day} {target.session_date:%B %Y}"
     if target.label:
@@ -88,12 +104,16 @@ class ResponseHandlers:
         self,
         groups: GroupService,
         responses: ResponseService,
+        matching: AccountMatchingService,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.groups = groups
         self.responses = responses
+        self.matching = matching
         self.clock = clock
         self.pending: dict[int, PendingReason] = {}
+        # The kept tap of an unlinked member, one per Telegram user ID. Memory only (T88).
+        self.links: dict[int, PendingReason] = {}
         self.prompts: dict[tuple[int, int], PendingReason] = {}
         self.has_pending = HasPendingReason(self.prompts)
         self.callbacks: OrderedDict[str, None] = OrderedDict()
@@ -141,6 +161,7 @@ class ResponseHandlers:
             return
         session_id, status = vote
         user_id = query.from_user.id
+        group: GroupDTO | None = None
         try:
             group = (
                 None
@@ -170,7 +191,13 @@ class ResponseHandlers:
                 self._clear_prompts(user_id)
                 await query.answer(messages.RECORDED.format(status=status.label), show_alert=True)
                 return
-        except (NotLinked, NotOnRoster, SessionNotOpen) as exc:
+        except NotLinked:
+            # Keep the tap. The member confirms their name in the private chat first (T88).
+            assert group is not None
+            self.links[user_id] = PendingReason(group.id, session_id, status)
+            await query.answer(url=f"https://t.me/{context.bot.username}?start={LINK_PAYLOAD}")
+            return
+        except (NotOnRoster, SessionNotOpen) as exc:
             await query.answer(_denied_text(exc), show_alert=True)
             return
         except SQLAlchemyError:
@@ -180,6 +207,104 @@ class ResponseHandlers:
         # A new tap replaces the pending one. Nothing is in the database yet.
         self.pending[user_id] = PendingReason(group.id, session_id, status)
         await query.answer(url=f"https://t.me/{context.bot.username}?start={START_PAYLOAD}")
+
+    async def link_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Private "/start link". Match the user's own Telegram username in the tap's group.
+
+        The bot never asks for a username and never shows another member's data (T89).
+        """
+        message, user = update.effective_message, update.effective_user
+        if message is None or user is None:
+            return
+        kept = self.links.get(user.id)
+        if kept is None:
+            await message.reply_text(messages.LINK_NO_PENDING)
+            return
+        try:
+            result = await self.matching.match(kept.group_id, user.id, user.username)
+        except (NotFound, SQLAlchemyError):
+            logging.getLogger(__name__).error("Account matching failed")
+            await message.reply_text(messages.TAP_NOT_SAVED)
+            return
+        if result.outcome is MatchOutcome.BY_TELEGRAM_ID:
+            # Linked since the tap, for example from another device.
+            self.links.pop(user.id, None)
+            await self._apply(context.bot, user.id, kept)
+            return
+        text, keyboard = render(result, kept.group_id)
+        if keyboard is None:
+            self.links.pop(user.id, None)
+            text = _not_found_text(user.username)
+        await message.reply_text(text, reply_markup=keyboard)
+
+    async def link_answer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Yes or No to "Are you <name>?". Yes links the account and saves the kept tap (T90).
+
+        The group and person IDs in the button are claims. The service binds only the person
+        that the user's own Telegram username proposes in that group.
+        """
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        answer = parse_match_callback(query.data)
+        if answer is None:
+            await edit_text(query, messages.PROPOSAL_EXPIRED, None)
+            return
+        user = query.from_user
+        try:
+            if answer.accept:
+                result = await self.matching.confirm(
+                    answer.group_id, user.id, user.username, answer.person_id
+                )
+            else:
+                result = await self.matching.reject(answer.group_id, user.id, user.username)
+        except NotFound:
+            await edit_text(query, messages.PROPOSAL_EXPIRED, None)
+            return
+        await self._after_match(query, context.bot, answer.group_id, result)
+
+    async def _after_match(
+        self, query: CallbackQuery, bot: Bot, group_id: int, result: MatchResult
+    ) -> None:
+        user_id = query.from_user.id
+        if result.outcome not in (MatchOutcome.BOUND_BY_HANDLE, MatchOutcome.BY_TELEGRAM_ID):
+            text, keyboard = render(result, group_id)
+            if result.outcome is MatchOutcome.UNRESOLVED:
+                self.links.pop(user_id, None)
+                text = _not_found_text(query.from_user.username)
+            await edit_text(query, text, keyboard)
+            return
+        kept = self.links.get(user_id)
+        if kept is None or kept.group_id != group_id:
+            # A restart lost the kept tap, or it belongs to another group.
+            await edit_text(query, messages.LINK_TAP_AGAIN, None)
+            return
+        del self.links[user_id]
+        await edit_text(query, messages.LINKED, None)
+        await self._apply(bot, user_id, kept)
+
+    async def _apply(self, bot: Bot, user_id: int, kept: PendingReason) -> None:
+        """Save a kept Coming tap, or ask for the reason of another status, in the private chat."""
+        try:
+            if kept.status is ResponseStatus.COMING:
+                await self.responses.record(kept.group_id, user_id, kept.session_id, kept.status)
+                await bot.send_message(user_id, messages.RECORDED.format(status=kept.status.label))
+                return
+            target = await self.responses.check(kept.group_id, user_id, kept.session_id)
+        except (NotLinked, NotOnRoster, SessionNotOpen) as exc:
+            await bot.send_message(user_id, _denied_text(exc))
+            return
+        except SQLAlchemyError:
+            logging.getLogger(__name__).error("Response database operation failed")
+            await bot.send_message(user_id, messages.TAP_NOT_SAVED)
+            return
+        self.pending[user_id] = kept
+        text = messages.REASON_PROMPT.format(
+            status=kept.status.label, session=_session_name(target)
+        )
+        prompt = await bot.send_message(user_id, text, reply_markup=ForceReply(selective=True))
+        self.prompts[user_id, prompt.message_id] = kept
 
     async def start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         """Private "/start reason" from the deep link. Ask for the reason of the pending tap."""

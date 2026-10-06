@@ -22,7 +22,7 @@ from attendee.telegram.groups import GroupHandlers
 from attendee.telegram.publication import CALLBACK_PATTERN as PUBLISH_PATTERN
 from attendee.telegram.publication import PublicationHandlers
 from attendee.telegram.responses import CALLBACK_PATTERN as VOTE_PATTERN
-from attendee.telegram.responses import START_PATTERN, ResponseHandlers
+from attendee.telegram.responses import LINK_PATTERN, START_PATTERN, ResponseHandlers
 from attendee.telegram.stats import CALLBACK_PATTERN as STATS_PATTERN
 from attendee.telegram.stats import StatsHandlers
 
@@ -47,7 +47,7 @@ def bot_handlers(
 
     Only the first matching handler runs. The reason handler comes before /attendance, but it
     matches only a reply to a known prompt, so other private text still reaches /attendance.
-    "/start reason" comes before the onboarding /start.
+    "/start reason" and "/start link" come before the onboarding /start.
     """
     private = filters.ChatType.PRIVATE
     return [
@@ -57,8 +57,9 @@ def bot_handlers(
         attendance.conversation(),
         CallbackQueryHandler(attendance.expired, pattern=CALLBACK_PATTERN),
         MessageHandler(private & filters.Regex(START_PATTERN), responses.start),
+        MessageHandler(private & filters.Regex(LINK_PATTERN), responses.link_start),
         CommandHandler("start", members.start, filters=private),
-        CallbackQueryHandler(members.answer, pattern=onboarding.CALLBACK_PATTERN),
+        CallbackQueryHandler(responses.link_answer, pattern=onboarding.CALLBACK_PATTERN),
         MessageHandler(filters.Document.ALL & private, admins.document),
         CallbackQueryHandler(admins.pick_group, pattern=uploads.GROUP_PATTERN),
         CallbackQueryHandler(admins.button, pattern=uploads.CALLBACK_PATTERN),

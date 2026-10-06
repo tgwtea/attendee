@@ -8,7 +8,7 @@ One bot serves many Telegram groups. Each group owns its own namelist, series, s
 A Telegram admin (creator or administrator) of a group is a bot admin for that group. The bot stores no admin list.
 In a private chat, a group admin uploads a namelist, creates Draft sessions with `/attendance`, publishes them with
 `/publish`, and reads reports with `/stats`. Members respond with the group poll buttons.
-Not built yet: linking an account from a poll tap (a private `/start` links nothing now), admin `/help`, reminders, and closure.
+Not built yet: admin `/help`, reminders, and closure.
 
 ## Stack
 
@@ -134,9 +134,15 @@ A duplicate-name warning means that a new row has the name of an existing member
 
 ## Member onboarding
 
-A private `/start` does not say which group the member belongs to, so it links nothing. The bot asks the member to tap
-a button on the group poll. Linking from that tap comes next: if the Telegram handle matches one namelist entry of
-that group, the bot asks "Are you <name>?" in the private chat. Yes links the account. No links nothing.
+A member links their account with their first tap on a group poll. They tap only once.
+
+1. The bot keeps the tap and opens the private chat.
+2. If the member's own Telegram username matches one namelist entry of that group, the bot asks "Are you <name>?".
+3. Yes links the account and saves the tap. Coming saves at once; another status asks for the reason as usual.
+4. No links nothing. No match, two matches, or no username: the bot tells the member to ask an admin to add them.
+
+The bot never asks a member to type a username, and it shows no other member's data. A bot restart forgets a kept
+tap; after Yes, the member taps the poll button again. A private `/start` on its own links nothing.
 
 ## Create a Draft attendance session
 

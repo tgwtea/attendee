@@ -40,6 +40,15 @@ LINKED = "Thanks, you're all set! Your Telegram account is now linked to the att
 PROPOSAL_EXPIRED = "This question has expired. Tap a button on the group poll to try again."
 # A private /start does not say which group the member belongs to (decision T80).
 START_FROM_GROUP = "To link your account, tap a button on an attendance poll in your group."
+# Linking from a poll tap (decisions T88–T90). Show only the member's own username.
+LINK_NO_PENDING = "Tap a button on the attendance poll in your group first."
+# PRD §34 "User not found". Two matches use this text too, with no names.
+LINK_NOT_FOUND = "I couldn't find @{handle} on the attendance list. Please ask an admin to add you."
+LINK_NO_USERNAME = (
+    "Your Telegram account has no username, so I can't find you on the attendance list. "
+    "Please ask an admin to add you."
+)
+LINK_TAP_AGAIN = "Thanks, you're linked! Please tap the poll button again."
 
 # ---------------------------------------------------------------------------
 # Namelist upload (admins)

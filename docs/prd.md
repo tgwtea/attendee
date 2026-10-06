@@ -501,6 +501,8 @@ The member onboarding flow should therefore ensure members establish a private b
 
 A group button can deep-link the user into the bot's private chat when a reason is required.
 
+**Clarification (2026-10-07):** A member links their account from their first poll tap. The bot keeps the tap, opens the private chat, and asks "Are you <name>?" when the member's own Telegram username matches one namelist entry of that group. After Yes, the bot saves the tap, so the member taps once only. With no single match, the bot tells the member to ask an admin to add them. The bot never asks a member to type a username. Decisions T88–T90.
+
 For example:
 
 **Provide reason privately →**

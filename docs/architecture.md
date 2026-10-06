@@ -94,7 +94,6 @@ The bot handles private chats, plus join, upgrade, and poll-button updates in gr
 | Handler | Trigger | Service calls |
 | --- | --- | --- |
 | `OnboardingHandlers.start` | Private `/start` | None; replies that linking starts from a group poll |
-| `OnboardingHandlers.answer` | `m:y:<group>:<person>`, `m:n:<group>:<person>` | `confirm` or `reject` |
 | `UploadHandlers.document` | A document | `GroupAccess.admin_groups`, `parse_file`, `ImportService.preview` |
 | `UploadHandlers.pick_group` | `i:g:<token>:<group>` | `GroupAccess.require_admin`, `ImportService.preview` |
 | `UploadHandlers.button` | `i:a:<token>`, `i:c:<token>` | `GroupAccess.require_admin`, `ImportService.apply` |
@@ -102,7 +101,7 @@ The bot handles private chats, plus join, upgrade, and poll-button updates in gr
 | `GroupHandlers.member_update` | `my_chat_member` | `GroupService.joined` or `left` |
 | `GroupHandlers.migrate` | Group upgrade service messages | `GroupService.migrate` |
 | `PublicationHandlers` | Private `/publish` and `p:` callbacks | `GroupAccess`, `PublicationService` |
-| `ResponseHandlers` | `v:` poll buttons, `/start reason`, reason replies | `GroupService.by_telegram_id`, `ResponseService` |
+| `ResponseHandlers` | `v:` poll buttons, `/start reason`, `/start link`, `m:` name answers, reason replies | `GroupService.by_telegram_id`, `ResponseService`, `AccountMatchingService` |
 | `StatsHandlers` | Private `/stats` and `st:` callbacks | `GroupAccess`, `ReportService` |
 
 - An admin of several groups picks the group first (T85). A group ID in a button is a claim; each step checks admin access in that group, and repositories read only its rows.
@@ -210,6 +209,8 @@ The group of a tap is the chat of the poll message, which Telegram fills. A chat
 1. A Coming tap calls `record()`. The bot answers with a pop-up that only the member sees.
 2. Another tap calls `check()` and writes nothing. The bot keeps the pending tap in memory and opens `t.me/<bot>?start=reason`.
 3. `/start reason` sends a private `ForceReply` prompt. A reply to that prompt calls `record()`. The bot confirms after commit.
+
+An unlinked member's tap is kept in memory and opens `t.me/<bot>?start=link` (T88). `/start link` matches the member's own username in that group and asks "Are you <name>?" (T89). Yes links the account and saves the kept tap: Coming at once, another status through the reason prompt (T90).
 
 The reason handler is first in the handler list. Its filter matches a reply to a known private reason prompt.
 Other private text still reaches `/attendance`. Each prompt keeps its original session and status after a new tap.
