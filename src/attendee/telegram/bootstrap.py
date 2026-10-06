@@ -20,6 +20,8 @@ from attendee.telegram.attendance import CALLBACK_PATTERN, AttendanceHandlers
 from attendee.telegram.chats import ChatHandlers
 from attendee.telegram.publication import CALLBACK_PATTERN as PUBLISH_PATTERN
 from attendee.telegram.publication import PublicationHandlers
+from attendee.telegram.responses import CALLBACK_PATTERN as VOTE_PATTERN
+from attendee.telegram.responses import START_PATTERN, ResponseHandlers
 
 # These dictionaries match the library defaults. Attendance state lives in its handlers.
 type BotApplication = Application[
@@ -35,12 +37,22 @@ def bot_handlers(
     attendance: AttendanceHandlers,
     chats: ChatHandlers,
     publication: PublicationHandlers,
+    responses: ResponseHandlers,
 ) -> list[BotHandler]:
-    """Private chat handlers, plus group registration and group upgrades."""
+    """Private chat handlers, group registration and upgrades, and group poll buttons.
+
+    Only the first matching handler runs. The reason handler comes before /attendance, but it
+    matches only a user with a pending tap, so other private text still reaches /attendance.
+    "/start reason" comes before the onboarding /start.
+    """
     private = filters.ChatType.PRIVATE
     return [
+        MessageHandler(
+            private & filters.TEXT & ~filters.COMMAND & responses.has_pending, responses.reason
+        ),
         attendance.conversation(),
         CallbackQueryHandler(attendance.expired, pattern=CALLBACK_PATTERN),
+        MessageHandler(private & filters.Regex(START_PATTERN), responses.start),
         CommandHandler("start", members.start, filters=private),
         CallbackQueryHandler(members.answer, pattern=onboarding.CALLBACK_PATTERN),
         MessageHandler(filters.Document.ALL & private, admins.document),
@@ -49,6 +61,7 @@ def bot_handlers(
         MessageHandler(filters.StatusUpdate.MIGRATE, chats.migrate),
         CommandHandler("publish", publication.start, filters=private),
         CallbackQueryHandler(publication.button, pattern=PUBLISH_PATTERN),
+        CallbackQueryHandler(responses.tap, pattern=VOTE_PATTERN),
     ]
 
 

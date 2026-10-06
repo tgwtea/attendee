@@ -37,8 +37,10 @@ def test_registered_handlers():
     application = build_application(TOKEN, create_handlers(Mock(), 1))
     names = [type(handler).__name__ for handler in application.handlers[0]]
     assert names == [
+        "MessageHandler",
         "ConversationHandler",
         "CallbackQueryHandler",
+        "MessageHandler",
         "CommandHandler",
         "CallbackQueryHandler",
         "MessageHandler",
@@ -46,6 +48,7 @@ def test_registered_handlers():
         "CommandHandler",
         "MessageHandler",
         "CommandHandler",
+        "CallbackQueryHandler",
         "CallbackQueryHandler",
     ]
 

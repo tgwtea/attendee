@@ -214,6 +214,23 @@ An admin resolves `publish_unknown` from `/publish`. "I can see the poll" opens 
 At startup, `main.recover_publications` moves every expired `publishing` attempt to `publish_unknown`. No scheduler exists (T8).
 Updates stay sequential (`concurrent_updates(False)`), so a send blocks other updates for at most the Telegram timeout.
 
+## Responses (implemented)
+
+`domain/responses.py` defines the four statuses, the button codes, the 1/0 attendance value, and the reason rules.
+`application/responses.py` supplies `ResponseService`. `repositories/responses.py` holds the response queries.
+`telegram/responses.py` holds the tap, `/start reason`, and reason-text handlers (decisions T62–T67).
+
+| Table | Purpose and constraints |
+| --- | --- |
+| `session_responses` | Current response per organization, session, and person: status, reason, first and last response time |
+| `session_response_events` | One row per change: status, reason, Telegram user ID, UTC time. No code updates a row. |
+
+1. A Coming tap calls `record()`. The bot answers with a pop-up that only the member sees.
+2. Another tap calls `check()` and writes nothing. The bot keeps the pending tap in memory and opens `t.me/<bot>?start=reason`.
+3. `/start reason` asks for the reason. The next private text calls `record()`. The bot confirms after commit.
+
+The reason handler is first in the handler list. Its filter matches only users with a pending tap, so other private text still reaches `/attendance`.
+
 [ACE LOGIC]
 If a request inserts a publishing attempt for a session then the request sends the poll.
 If a session has an active attempt then no other request sends a poll for the session.
@@ -273,7 +290,7 @@ Alembic owns schema changes. Its async environment imports the project metadata 
 `alembic/env.py` imports `attendee.persistence.models` before it reads the metadata.
 Revision `0001_identity` creates the identity tables. Revision `0002_import_matching` adds `unresolved_matches` and a handle index, and converts stored handles to canonical form. Revision `0003_candidate_rejected` adds the `candidate_rejected` reason.
 Revision `0004_attendance` adds the three attendance tables without seed data. Its downgrade drops only those tables and their data.
-Revision `0005_organization_chats` adds `organization_chats`. Revision `0006_session_publications` adds `session_publications` and alters no existing table.
+Revision `0005_organization_chats` adds `organization_chats`. Revision `0006_session_publications` adds `session_publications` and alters no existing table. Revision `0007_session_responses` adds `session_responses` and `session_response_events`.
 Revisions use plain SQLAlchemy types.
 `write_session()` starts a transaction with `BEGIN IMMEDIATE`. Use it for an operation that reads and then writes.
 SQLite stores timestamps as naive UTC. The `UTCDateTime` column type rejects naive input and returns aware UTC values.

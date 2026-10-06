@@ -15,6 +15,7 @@ from attendee.application.imports import ImportService
 from attendee.application.matching import AccountMatchingService
 from attendee.application.organizations import OrganizationService
 from attendee.application.publication import PublicationService
+from attendee.application.responses import ResponseService
 from attendee.config.settings import ConfigurationError, Settings
 from attendee.logging import configure_logging
 from attendee.persistence.database import create_engine, create_session_factory
@@ -23,6 +24,7 @@ from attendee.telegram.bootstrap import BotHandler, bot_handlers, build_applicat
 from attendee.telegram.chats import ChatHandlers
 from attendee.telegram.onboarding import OnboardingHandlers
 from attendee.telegram.publication import PublicationHandlers
+from attendee.telegram.responses import ResponseHandlers
 from attendee.telegram.uploads import UploadHandlers
 
 
@@ -78,6 +80,7 @@ def create_handlers(
             AuthorizationService(session_factory),
             PublicationService(session_factory, timezone),
         ),
+        ResponseHandlers(organization_id, ResponseService(session_factory)),
     )
 
 

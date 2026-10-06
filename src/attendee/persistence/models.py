@@ -1,4 +1,4 @@
-"""ORM records for organization identity, unresolved matches, chats, attendance, and publication."""
+"""ORM records for identity, unresolved matches, chats, attendance, publication, and responses."""
 
 from datetime import date, datetime
 
@@ -279,3 +279,55 @@ class SessionPublication(Base):
     resolved_by: Mapped[int | None]
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
+
+
+_RESPONSE_STATUS = "status IN ('coming', 'not_coming', 'late', 'leaving_early')"
+_REASON_RULE = (
+    "(status = 'coming' AND reason IS NULL) OR "
+    "(status <> 'coming' AND length(reason) BETWEEN 1 AND 1000)"
+)
+_ROSTER_COLUMNS = ["organization_id", "session_id", "person_id"]
+_ROSTER_TARGET = [
+    "session_roster_entries.organization_id",
+    "session_roster_entries.session_id",
+    "session_roster_entries.person_id",
+]
+
+
+class SessionResponse(Base):
+    """The current response of one roster member (decision T62). Attendance counts this row."""
+
+    __tablename__ = "session_responses"
+    __table_args__ = (
+        CheckConstraint(_RESPONSE_STATUS, name="valid_response_status"),
+        CheckConstraint(_REASON_RULE, name="reason_matches_status"),
+        ForeignKeyConstraint(_ROSTER_COLUMNS, _ROSTER_TARGET, ondelete="RESTRICT"),
+    )
+    organization_id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(primary_key=True)
+    person_id: Mapped[int] = mapped_column(primary_key=True)
+    status: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str | None] = mapped_column(String(1000))
+    responded_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class SessionResponseEvent(Base):
+    """One append-only audit row per response change (decision T13). No code updates it."""
+
+    __tablename__ = "session_response_events"
+    __table_args__ = (
+        CheckConstraint(_RESPONSE_STATUS, name="valid_response_status"),
+        CheckConstraint(_REASON_RULE, name="reason_matches_status"),
+        CheckConstraint("telegram_user_id > 0", name="telegram_user_id_positive"),
+        ForeignKeyConstraint(_ROSTER_COLUMNS, _ROSTER_TARGET, ondelete="RESTRICT"),
+        Index("ix_session_response_events_member", "session_id", "person_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int]
+    session_id: Mapped[int]
+    person_id: Mapped[int]
+    status: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str | None] = mapped_column(String(1000))
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())

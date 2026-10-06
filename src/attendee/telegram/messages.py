@@ -73,8 +73,26 @@ PUBLISH = "Publish"
 PREVIOUS = "Previous"
 NEXT = "Next"
 
-# PRD §12 poll buttons. Their callback handler arrives with responses (phase 5 step 3).
+# PRD §12 poll buttons. telegram/responses.py handles them.
 POLL_BUTTONS = (("Coming", "c"), ("Not Coming", "n"), ("Late", "l"), ("Leaving Early", "e"))
+
+# Responses. A group tap answers with a pop-up that only the member sees, or opens the
+# private chat. No text below goes to the group.
+RECORDED = "Attendance recorded: {status}"
+RECORDED_REASON = "Attendance recorded: {status}\nReason: {reason}"
+REASON_PROMPT = "You selected {status} for {session}.\n\nPlease enter your reason."
+NO_PENDING_REASON = "No response is waiting for a reason. Tap a button on the group poll first."
+# PRD §34 "Reason missing" and "Poll closed".
+REASON_MISSING = "Please provide a reason before your response can be submitted."
+REASON_TOO_LONG = "Use 1000 characters or fewer for your reason. Send it again."
+POLL_CLOSED = (
+    "This attendance poll has already been closed. "
+    "Contact an admin if your response needs to be changed."
+)
+NOT_ON_ROSTER = "You are not on the list for this session."
+VOTE_INVALID = "This button is not valid."
+TAP_NOT_SAVED = "Not saved. Tap the button again."
+REASON_NOT_SAVED = "Not saved. Send your reason again."
 
 
 def confirm_name(name: str) -> str:

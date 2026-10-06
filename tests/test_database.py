@@ -62,6 +62,8 @@ def test_metadata_has_all_tables():
         "attendance_series",
         "attendance_sessions",
         "session_roster_entries",
+        "session_responses",
+        "session_response_events",
     }
 
 

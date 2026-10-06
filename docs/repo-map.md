@@ -29,7 +29,8 @@ Update this file when the repository structure changes.
 │       ├── 0003_candidate_rejected.py
 │       ├── 0004_attendance.py
 │       ├── 0005_organization_chats.py
-│       └── 0006_session_publications.py
+│       ├── 0006_session_publications.py
+│       └── 0007_session_responses.py
 ├── scripts/entrypoint.sh
 ├── src/attendee/
 │   ├── __init__.py
@@ -49,6 +50,7 @@ Update this file when the repository structure changes.
 │   │   ├── chats.py
 │   │   ├── onboarding.py
 │   │   ├── publication.py
+│   │   ├── responses.py
 │   │   └── uploads.py
 │   ├── persistence/
 │   │   ├── __init__.py
@@ -70,7 +72,8 @@ Update this file when the repository structure changes.
 │   │   ├── import_files.py
 │   │   ├── imports.py
 │   │   ├── matching.py
-│   │   └── publication.py
+│   │   ├── publication.py
+│   │   └── responses.py
 │   ├── domain/
 │   │   ├── __init__.py
 │   │   ├── identity.py
@@ -78,14 +81,16 @@ Update this file when the repository structure changes.
 │   │   ├── chats.py
 │   │   ├── imports.py
 │   │   ├── matching.py
-│   │   └── publication.py
+│   │   ├── publication.py
+│   │   └── responses.py
 │   ├── repositories/
 │   │   ├── __init__.py
 │   │   ├── identity.py
 │   │   ├── attendance.py
 │   │   ├── chats.py
 │   │   ├── matching.py
-│   │   └── publication.py
+│   │   ├── publication.py
+│   │   └── responses.py
 │   └── reporting/
 │       ├── __init__.py
 │       └── imports.py
@@ -104,6 +109,7 @@ Update this file when the repository structure changes.
 │   ├── test_attendance_conversation.py
 │   ├── test_chats.py
 │   ├── test_publication.py
+│   ├── test_responses.py
 │   ├── test_onboarding.py
 │   ├── test_uploads.py
 │   └── telegram_fakes.py
@@ -126,7 +132,7 @@ Update this file when the repository structure changes.
 | `.env.example`, `.gitignore`, `.dockerignore` | Example settings and local/build exclusions |
 | `.github/workflows/ci.yml` | Automated dependency, lint, format, type, and test checks |
 | `Dockerfile`, `compose.yaml`, `scripts/entrypoint.sh` | Container build, persistent volume, and migration-first startup |
-| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, `0003_candidate_rejected`, `0004_attendance`, `0005_organization_chats`, and `0006_session_publications` revisions |
+| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, `0003_candidate_rejected`, `0004_attendance`, `0005_organization_chats`, `0006_session_publications`, and `0007_session_responses` revisions |
 | `src/attendee/main.py` | Explicit dependency construction and bot lifecycle |
 | `src/attendee/config/` | Validated environment settings |
 | `src/attendee/logging.py` | Standard logs with token redaction |
@@ -142,4 +148,4 @@ Update this file when the repository structure changes.
 | `tests/` | Tests with temporary migrated databases and fake Telegram updates; no live Telegram account |
 
 Local `.venv/`, `.env`, caches, and `data/` are ignored. Docker stores runtime data in a named volume.
-Draft attendance creation and group registration exist. Publication, responses, reminders, closure, calculations, and exports remain deferred.
+Draft attendance creation, group registration, publication, and responses exist. Reminders, closure, calculations, and exports remain deferred.
