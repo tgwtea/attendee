@@ -225,6 +225,16 @@ A member on the session roster taps a poll button in the group. The group never 
 
 Admin resolution of unresolved identity matches remains necessary before a real rollout.
 
+## Attendance reports and export
+
+An admin sends `/stats` in a private chat with the bot.
+
+1. Pick a series. Only series with a published session appear.
+2. Pick a session to see the counts (PRD §19). Use View No Response, View Responses, or View Reasons. Only admins see these.
+3. Or tap Export Excel to get `<series>.xlsx` for the whole series.
+
+The workbook has SN, Name, Present, Absent, and Percentage, then one column per session. Cells hold `1` (Coming), `0` (Not Coming, Late, or Leaving Early), `NR` (no response), or `NA` (not on that session's list). Present, Absent, and Percentage are live formulas, so an edit in the file updates them. Only Closed sessions and archived sessions count. Open sessions come after them, marked `(Open)`. The bot keeps no copy of the file.
+
 ## Edit the bot text
 
 Every text that the bot shows to a person is in `src/attendee/copy.py`, grouped by flow. Change the wording there.

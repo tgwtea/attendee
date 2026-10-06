@@ -2,7 +2,8 @@
 
 Rules for editors:
 - Keep each `{placeholder}` exactly. Code fills it with `.format()`. A test checks the names.
-- A text never shows another member's response, reason, or count.
+- A text never shows another member's response, reason, or count. The one exception is the
+  "Attendance reports" section: only an admin gets those texts, in a private chat.
 - The comment `PRD §34` marks a text whose meaning the PRD fixes. Change its words, not its meaning.
 """
 
@@ -213,3 +214,42 @@ NOT_ON_ROSTER = "You're not on the list for this session."
 VOTE_INVALID = "This button doesn't work anymore."
 TAP_NOT_SAVED = "Sorry, that didn't save. Please tap the button again."
 REASON_NOT_SAVED = "Sorry, that didn't save. Please send your reason again."
+
+# ---------------------------------------------------------------------------
+# Attendance reports (/stats, admins only, private chat). These texts show other
+# members' responses, reasons, and counts, so they never go to a group or a member.
+# ---------------------------------------------------------------------------
+STATS_DENIED = "Only admins can see attendance reports."
+STATS_EXPIRED = "This button doesn't work anymore. Send /stats again."
+STATS_DB_FAILED = "I couldn't load the report. Send /stats to try again."
+STATS_EXPORT_FAILED = "I couldn't make the file. Send /stats to try again."
+STATS_NO_SERIES = "There's no published poll yet. Publish one with /publish."
+STATS_SERIES_NOT_FOUND = "I couldn't find that series."
+STATS_SELECT_SERIES = "Which series do you want to see?"
+STATS_SERIES = "{series}\n\nPick a session to see its responses, or export the whole series."
+STATS_SERIES_NO_SESSIONS = (
+    "{series}\n\nNo current sessions. Archived sessions are still in the export."
+)
+STATS_SESSION_BUTTON = "{session} · {status}"
+STATS_EXPORT = "Export Excel"
+# PRD §19 admin attendance view.
+STATS_SESSION = (
+    "{series} — {session}\nStatus: {status}\n\n"
+    "Responded: {responded} / {required}\nNo response: {missing}\n\n{counts}"
+)
+STATS_COUNT = "{status}: {count}"
+STATS_VIEW_NO_RESPONSE = "View No Response"
+STATS_VIEW_RESPONSES = "View Responses"
+STATS_VIEW_REASONS = "View Reasons"
+STATS_NO_RESPONSE_TITLE = "No response — {session}"
+STATS_EVERYONE_RESPONDED = "Everyone responded."
+STATS_RESPONSES_TITLE = "Responses — {session}"
+STATS_NO_RESPONSES = "No responses yet."
+STATS_STATUS_GROUP = "{status} ({count})"
+STATS_MEMBER = "- {name}"
+STATS_REASONS_TITLE = "Reasons — {session}\nOnly admins can see this."
+STATS_REASON = "- {name} · {status}: {reason}"
+STATS_NO_REASONS = "No reasons yet."
+# XLSX export. Open sessions sit after the totals and do not count yet (decision T73).
+STATS_OPEN_COLUMN = "{session} (Open)"
+STATS_EXPORT_CAPTION = "{series}. Columns marked (Open) don't count in the totals yet."

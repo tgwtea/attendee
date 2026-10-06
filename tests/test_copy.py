@@ -43,6 +43,19 @@ PLACEHOLDERS = {
     "RECORDED_REASON": {"status", "reason"},
     "CONFIRM_REPLACE": {"current", "new", "seconds"},
     "REASON_PROMPT": {"status", "session"},
+    "STATS_SERIES": {"series"},
+    "STATS_SERIES_NO_SESSIONS": {"series"},
+    "STATS_SESSION_BUTTON": {"session", "status"},
+    "STATS_SESSION": {"series", "session", "status", "responded", "required", "missing", "counts"},
+    "STATS_COUNT": {"status", "count"},
+    "STATS_NO_RESPONSE_TITLE": {"session"},
+    "STATS_RESPONSES_TITLE": {"session"},
+    "STATS_STATUS_GROUP": {"status", "count"},
+    "STATS_MEMBER": {"name"},
+    "STATS_REASONS_TITLE": {"session"},
+    "STATS_REASON": {"name", "status", "reason"},
+    "STATS_OPEN_COLUMN": {"session"},
+    "STATS_EXPORT_CAPTION": {"series"},
 }
 
 

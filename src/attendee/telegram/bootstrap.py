@@ -22,6 +22,8 @@ from attendee.telegram.publication import CALLBACK_PATTERN as PUBLISH_PATTERN
 from attendee.telegram.publication import PublicationHandlers
 from attendee.telegram.responses import CALLBACK_PATTERN as VOTE_PATTERN
 from attendee.telegram.responses import START_PATTERN, ResponseHandlers
+from attendee.telegram.stats import CALLBACK_PATTERN as STATS_PATTERN
+from attendee.telegram.stats import StatsHandlers
 
 # These dictionaries match the library defaults. Attendance state lives in its handlers.
 type BotApplication = Application[
@@ -38,6 +40,7 @@ def bot_handlers(
     chats: ChatHandlers,
     publication: PublicationHandlers,
     responses: ResponseHandlers,
+    stats: StatsHandlers,
 ) -> list[BotHandler]:
     """Private chat handlers, group registration and upgrades, and group poll buttons.
 
@@ -62,6 +65,8 @@ def bot_handlers(
         CommandHandler("publish", publication.start, filters=private),
         CallbackQueryHandler(publication.button, pattern=PUBLISH_PATTERN),
         CallbackQueryHandler(responses.tap, pattern=VOTE_PATTERN),
+        CommandHandler("stats", stats.start, filters=private),
+        CallbackQueryHandler(stats.button, pattern=STATS_PATTERN),
     ]
 
 
