@@ -28,7 +28,7 @@ The PRD sets these decisions. Change them only through a PRD change.
 ## Accepted technical decisions
 
 All entries below have status **Accepted**.
-T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**.
+T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**. T50–T54 date from **2026-10-06**.
 The finalized MVP stack supplies these choices. Product behavior remains subject to the PRD.
 
 | ID | Choice | Reason and consequence |
@@ -43,7 +43,7 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T8 | No dedicated application scheduler | Evaluate deadlines during application operations. Host cron runs daily backups. Automatic reminders remain deferred. |
 | T9 | Pydantic v2 and `pydantic-settings` | Separate validated DTOs from ORM records. Use local `.env` and deployed environment variables. |
 | T10 | Global person identity and organization memberships | Support many-to-many membership with organization-scoped `member` and `admin` roles. Avoid global authorization assumptions. |
-| T11 | Organization chats, series defaults, session overrides | Prepare the schema for several chats without new MVP management flows. |
+| T11 | Organization chats, series defaults, session overrides | Prepare the schema for several chats. Group registration exists (T50, T51). Series defaults and session overrides remain deferred. |
 | T12 | Series default rosters and fixed session snapshots | Later membership changes must not rewrite historical participation requirements. |
 | T13 | Relational custom fields and response audit history | Avoid JSON member fields. Keep one current response plus append-only audit records. |
 | T14 | Thin handlers, application services, repositories, ORM, SQLite | Construct dependencies manually. Require explicit organization scope. Domain rules remain independent of transport and storage. |
@@ -65,7 +65,7 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T30 | Stale preview detection | `apply` builds the preview again inside the write transaction. If it differs from the confirmed preview, the import applies nothing and raises `ImportConflict`. A rejected row raises `ImportRejected` and applies nothing. |
 | T31 | A handle match needs member confirmation | Matching by handle proposes one candidate. The bot asks the member to confirm the candidate name. It binds the Telegram ID only after confirmation. A rejection records an unresolved match. The name confirms a match; it never finds one. A Telegram ID match needs no confirmation. Implemented by `AccountMatchingService.match`, `confirm`, and `reject` (T34). |
 | T32 | Import warns about a possible duplicate | The preview warns when a row to create has the same name as an existing member of the organization. The warning never blocks, matches, or merges. Admins keep a `Telegram ID` column in their namelist files to avoid duplicates after a handle change. |
-| T33 | One organization per bot deployment | Setting `BOT_ORGANIZATION=<slug>` selects the organization for `/start` and uploads. Bot startup fails if the setting is empty or no organization has the slug. Services keep an explicit organization ID. Registered organization chats (T11) stay deferred. No migration. |
+| T33 | One organization per bot deployment | Setting `BOT_ORGANIZATION=<slug>` selects the organization for `/start` and uploads. Bot startup fails if the setting is empty or no organization has the slug. Services keep an explicit organization ID. Group registration (T50) registers groups for this organization. |
 | T34 | Stateless handle confirmation | `match` returns `PROPOSED` and binds nothing. The Yes and No buttons carry `m:y:<organization ID>:<person ID>` or `m:n:...`. `confirm` matches again in one `BEGIN IMMEDIATE` transaction and binds only if the fresh result proposes the same person. Otherwise it returns the fresh result. No proposal is stored, so a button still works after a restart. A repeated answer has no extra effect. |
 | T35 | Rejected candidate reason | A "No" records the unresolved reason `candidate_rejected`. Revision `0003_candidate_rejected` widens the `unresolved_matches.reason` CHECK constraint. The downgrade converts those rows to `no_match`. |
 | T36 | Telegram upload limits | The bot accepts a private-chat document named `.csv` or `.xlsx`, at most 5 MB. It checks the declared size before download. It downloads into memory, parses in a worker thread, and never writes the file to disk. Only an admin of the configured organization can upload. |
@@ -76,35 +76,15 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T40 | Series buttons and normalized-name uniqueness | Show existing series in pages of ten. Normalize names with whitespace collapse and Unicode casefold. Keep punctuation significant. `Patron's Day` and `Patrons Day` remain distinct. Buttons reduce accidental duplicates. Names and labels permit 1–200 characters. |
 | T41 | Required date and optional label | Each session stores a calendar date separate from its label. An absent label uses the date for display. Accept `YYYY-MM-DD` and English `12 Oct 2026`. |
 | T42 | Explicit deadline formats in APP_TIMEZONE | Accept either date format followed by `HH:MM` or `8:00 PM`, with an optional comma. Show the timezone and UTC offset before confirmation. Reject relative dates, incomplete dates, and ambiguous or nonexistent local times. Past dates and deadlines remain valid. The user permits extra libraries, but these formats need none. T17 remains applicable. |
-| T43 | Defer chat registration | The next phase adds `/register`. One bot serves one organization and supports several group chats or channels. T11 retains series defaults and session overrides. No chat table or registration command exists in this phase. |
+| T43 | Defer chat registration | Superseded by T50–T54. One bot serves one organization and supports several groups. Channels are not supported (T52). T11 retains series defaults and session overrides. |
 | T44 | In-memory attendance conversation | Use `ConversationHandler` with sequential updates and user/chat scope. Keep one unfinished conversation per admin chat. A restart or new `/attendance` cancels unfinished input. No separate unfinished-draft table exists. Committed Draft sessions persist. |
 | T45 | Bound, single-use callbacks | Use `a:<token>:<action>[:<id>]`, within 64 bytes. Bind the token to organization, admin, chat, message, and step. Replace tokens after each accepted step. Consume confirmation before database work. Invalid or expired buttons have no extra effect. |
 | T46 | Persistent creation key | Store a unique organization/creation key and request fingerprint on the session. An identical retry returns the same session. Another creator or different confirmed input raises `CreationConflict`. Check authorization again on retries. |
 | T47 | Confirm roster changes again | Compare current membership identities with the preview inside `BEGIN IMMEDIATE`. A difference creates nothing. Show a fresh summary and require confirmation again, even if the count stays equal. |
 | T48 | Atomic final creation | Save a new series, session, and snapshot in one transaction after final confirmation. Cancellation creates nothing. Duplicate series names return the admin to series selection. Database constraints prevent cross-organization links and duplicate roster entries. Restrict deletion of referenced memberships. Revision `0004_attendance` adds only the three attendance tables. |
 | T49 | Derived deadline status | Store `draft`, `open`, and `closed`. Derive `Deadline Passed` only when an Open session has a deadline earlier than the read time. A deadline never changes stored status. No status transition operation exists in this phase. |
-
-## Foundation defaults
-
-- The SQLite busy timeout is 5,000 ms and is configurable.
-- The local database URL is `sqlite+aiosqlite:///./data/attendee.db`.
-- Docker uses the same relative URL from `/app`. Its named volume covers `/app/data`.
-- The backup directory is `./data/backups`. Retention is fixed at 14 completed backups.
-- `TELEGRAM_BOT_TOKEN` is required only for bot startup.
-- Bootstrap admin IDs accept comma-separated values or a JSON array. The bot accepts an empty list. `attendee-setup` rejects an empty list.
-- A backup file lock rejects overlapping runs. Failed backup creation never prunes completed backups.
-- SQLite transaction events issue explicit `BEGIN` statements. This also protects schema changes from partial transaction commits.
-- `hatchling` supplies the build backend only. It is not an application runtime dependency.
-
-## Open product questions for later phases
-
-These questions do not block the current phase. Do not settle them through an implementation assumption.
-
-No unanswered choices remain for this phase.
-
-Before real rollout, add an admin operation to resolve an unmatched Telegram account.
-No resolution interface or admin management command exists in this phase.
-
-Resolved on 2026-10-05: organization context in a private chat (T33), confirmation storage (T34), the rejection reason (T35), upload limits (T36), and preview storage (T37).
-
-Resolved on 2026-10-04: the percentage denominator (P13), public reminder counts (P14), bootstrap admin membership (T21), the reasons cell (P15), the incomplete replacement reason (P16), handle confirmation (T31), and duplicate warnings after a handle change (T32).
+| T50 | `/register` runs inside the group | The sender must be an admin of the configured organization and a `creator` or `administrator` of the Telegram group. The bot reads the group role with `getChatMember` before the write transaction. It trusts only Telegram-filled sender fields. An anonymous sender (`sender_chat`, or the `GroupAnonymousBot` account) gets a request to turn off anonymity. An unlinked Telegram account is rejected before the role check. |
+| T51 | One owner per group; several groups per organization | `organization_chats.telegram_chat_id` is unique across organizations. Another organization's attempt changes nothing and gets a "taken" reply. A repeat by the same organization refreshes the title and type. This adds "multiple Telegram groups" from PRD §41 now, by user decision on 2026-10-06. The admin picks a group at publish time. |
+| T52 | No channels | Only `group` and `supergroup` chats register. A channel post has no sender for the T50 checks. A database `CHECK` constraint enforces the two types. |
+| T53 | Follow supergroup upgrades | An upgrade gives the group a new chat ID. The bot handles both service messages (`migrate_to_chat_id` and `migrate_from_chat_id`) and updates the stored chat ID in place. A repeat has no extra effect. |
+| T54 | Revision `0005_organization_chats` | Adds only `organization_chats`, with organization-scoped foreign keys and restricted deletes. The downgrade drops the table and its data. |

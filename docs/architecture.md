@@ -1,6 +1,6 @@
 # Architecture
 
-Status: runnable bot with identity, namelist import, onboarding, attendance series, and Draft sessions with fixed rosters.
+Status: runnable bot with identity, namelist import, onboarding, attendance series, Draft sessions with fixed rosters, and group registration.
 
 `docs/prd.md` defines the product. `docs/decisions.md` records the accepted stack. `AGENTS.md` defines coding rules.
 
@@ -86,7 +86,7 @@ If a callback repeats then the bot applies no extra effect.
 
 ## Telegram handlers (implemented)
 
-The bot handles private chats only. Each handler translates between Telegram and one application service. Business rules stay in the services.
+The bot handles private chats, plus `/register` and upgrade messages in groups. Each handler translates between Telegram and one application service. Business rules stay in the services.
 
 | Handler | Trigger | Service calls |
 | --- | --- | --- |
@@ -95,6 +95,8 @@ The bot handles private chats only. Each handler translates between Telegram and
 | `UploadHandlers.document` | A document | `IdentityService`, `AuthorizationService.require_role`, `parse_file`, `ImportService.preview` |
 | `AttendanceHandlers` | Private `/attendance`, `/cancel`, and `a:` callbacks | `AttendanceService`, identity, and authorization |
 | `UploadHandlers.button` | `i:a:<token>`, `i:c:<token>` | `AuthorizationService.require_role`, `ImportService.apply` |
+| `ChatHandlers.register` | Group `/register` | `IdentityService`, `getChatMember`, `ChatRegistrationService.register` |
+| `ChatHandlers.migrate` | Group upgrade service messages | `ChatRegistrationService.migrate` |
 
 - A member sees the candidate name only. The bot never shows another member's handle, Telegram ID, or an unresolved reason.
 - No match, an ambiguous match, a taken Telegram ID, and a rejection all show the PRD §34 "User not found" text.
@@ -164,12 +166,35 @@ Every attendance session has a roster snapshot.
 If an administrator changes a membership then every existing roster snapshot remains unchanged.
 If an open session passes a deadline then the session remains open.
 
+## Group registration (implemented)
+
+`domain/chats.py` defines the registrable chat types and the Telegram roles that control a group.
+`application/chats.py` supplies `ChatRegistrationService`. `repositories/chats.py` holds the chat queries.
+`telegram/chats.py` translates group updates.
+
+1. An admin sends `/register` inside a group or supergroup.
+2. The handler rejects an anonymous sender. It resolves the sender's Telegram ID to a person.
+3. The handler reads the sender's group role with `getChatMember`. No transaction is open during this call.
+4. `register` checks the group role, then opens one `write_session()`. It checks the organization admin role and stores the chat.
+
+| Table | Purpose and constraints |
+| --- | --- |
+| `organization_chats` | Organization, Telegram chat ID (unique across organizations), type (`group` or `supergroup`), title, registering admin, UTC times |
+
+A group upgrade to a supergroup changes the chat ID. `migrate` updates the stored row in place.
+The registration lookup across organizations returns only the owning organization ID.
+
+[ACE LOGIC]
+If a person sends a registration command and the person is not an administrator of the organization then the bot registers no group.
+If a person sends a registration command and the person is not an administrator of the group then the bot registers no group.
+If a sender is anonymous then the bot registers no group.
+If an organization owns a group then no other organization registers the group.
+
 ## Future organization model
 
 These constraints describe deferred extensions to the current models.
 
 - An `Organization` also owns chats, series, and custom field definitions.
-- An organization can have several Telegram chats.
 - A series belongs to one organization. It can select a default chat.
 - A session can override that chat with another chat from the same organization.
 - A series holds a default roster. Session creation copies the required membership into a session roster snapshot.

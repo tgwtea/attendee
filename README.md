@@ -89,6 +89,7 @@ Revision `0002_import_matching` adds `unresolved_matches` and the `people.telegr
 Revision `0004_attendance` adds `attendance_series`, `attendance_sessions`, and `session_roster_entries`.
 It preserves existing identity and import data. It seeds no attendance data.
 Its downgrade drops these three tables and all attendance data.
+Revision `0005_organization_chats` adds `organization_chats`. Its downgrade drops that table and every registered group.
 
 Revision `0003_candidate_rejected` adds the `candidate_rejected` unresolved reason. It copies the `unresolved_matches` table and keeps every row. Its downgrade changes those rows to `no_match`.
 An existing foundation database has an empty `alembic_version` table. `upgrade head` adds the tables without data loss.
@@ -188,9 +189,14 @@ The bot saves a new series, session, and snapshot in one transaction after confi
 A restart cancels unfinished conversations. Saved Draft sessions survive a restart.
 Old buttons expire. A repeated confirmation creates no duplicate session.
 
-This phase posts nothing to a group. It adds no response buttons, reminders, closure, calculations, or exports.
-The next phase should add `/register`, publication, and responses together.
-One bot serves one organization. Future registration will support several group chats or channels.
+## Register a group
+
+Add the bot to the Telegram group. An admin of `BOT_ORGANIZATION` sends `/register` inside the group.
+The sender must also be the creator or an administrator of the group, and must not post anonymously.
+One organization can register several groups. A group belongs to one organization only. Channels are not supported.
+The bot follows a group upgrade to a supergroup and keeps the registration.
+
+The bot posts no attendance poll yet. Publication and responses come in the next steps of this phase.
 Admin resolution of unresolved identity matches remains necessary before a real rollout.
 
 ## Docker Compose

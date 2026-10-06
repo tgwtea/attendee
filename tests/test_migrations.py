@@ -8,6 +8,8 @@ from conftest import ROOT, run_alembic
 
 ATTENDANCE_TABLES = {"attendance_series", "attendance_sessions", "session_roster_entries"}
 IDENTITY_TABLES = {"organizations", "people", "memberships", "unresolved_matches"}
+CHAT_TABLES = {"organization_chats"}
+HEAD_TABLES = IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {"alembic_version"}
 
 
 def tables(database):
@@ -21,11 +23,13 @@ def test_fresh_and_repeated_upgrade(tmp_path):
     for _ in range(2):
         result = run_alembic(database, "upgrade", "head")
         assert result.returncode == 0, result.stderr
-    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | {"alembic_version"}
+    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {
+        "alembic_version"
+    }
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            ("0004_attendance",)
+            ("0005_organization_chats",)
         ]
 
 
@@ -40,7 +44,9 @@ def test_upgrade_from_empty_foundation(tmp_path):
         connection.commit()
     result = run_alembic(database, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | {"alembic_version"}
+    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {
+        "alembic_version"
+    }
 
 
 def test_upgrade_from_identity_normalizes_handles(tmp_path):
@@ -55,7 +61,9 @@ def test_upgrade_from_identity_normalizes_handles(tmp_path):
         connection.commit()
     result = run_alembic(database, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | {"alembic_version"}
+    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | CHAT_TABLES | {
+        "alembic_version"
+    }
     with closing(sqlite3.connect(database)) as connection:
         rows = connection.execute(
             "SELECT display_name, telegram_handle FROM people ORDER BY id"
@@ -84,7 +92,7 @@ def test_failed_revision_rolls_back_schema(tmp_path):
     (scripts / "versions" / "failure.py").write_text(
         "from alembic import op\n"
         'revision = "failure"\n'
-        'down_revision = "0004_attendance"\n'
+        'down_revision = "0005_organization_chats"\n'
         "def upgrade():\n"
         '    op.execute("CREATE TABLE migration_probe (id INTEGER)")\n'
         '    raise RuntimeError("deliberate migration failure")\n'
@@ -199,3 +207,49 @@ def test_attendance_upgrade_downgrade_preserves_identity(tmp_path):
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     assert run_alembic(database, "upgrade", "head").returncode == 0
     assert run_alembic(database, "check").returncode == 0
+
+
+def test_chat_upgrade_downgrade_preserves_attendance(tmp_path):
+    database = tmp_path / "chats-upgrade.db"
+    assert run_alembic(database, "upgrade", "0004_attendance").returncode == 0
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript(
+            "INSERT INTO organizations (id,slug,name,created_at) "
+            "VALUES (1,'club','Club','2026-10-06 00:00:00'),"
+            "(2,'band','Band','2026-10-06 00:00:00');"
+            "INSERT INTO people (id,display_name,created_at,updated_at) "
+            "VALUES (1,'Admin','2026-10-06 00:00:00','2026-10-06 00:00:00');"
+            "INSERT INTO memberships (organization_id,person_id,role,created_at,updated_at) "
+            "VALUES (1,1,'admin','2026-10-06 00:00:00','2026-10-06 00:00:00'),"
+            "(2,1,'admin','2026-10-06 00:00:00','2026-10-06 00:00:00');"
+            "INSERT INTO attendance_series "
+            "(id,organization_id,name,normalized_name,created_by,created_at) "
+            "VALUES (1,1,'Practice','practice',1,'2026-10-06 00:00:00');"
+        )
+        connection.commit()
+    result = run_alembic(database, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    insert = (
+        "INSERT INTO organization_chats (organization_id,telegram_chat_id,chat_type,title,"
+        "registered_by,registered_at,updated_at) "
+        "VALUES (?,?,?,'Samba',1,'2026-10-06 00:00:00','2026-10-06 00:00:00')"
+    )
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(insert, (1, -100, "supergroup"))
+        # One group belongs to one organization only.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (2, -100, "supergroup"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert, (1, -200, "channel"))
+        connection.commit()
+    assert run_alembic(database, "check").returncode == 0
+    result = run_alembic(database, "downgrade", "0004_attendance")
+    assert result.returncode == 0, result.stderr
+    assert tables(database) == IDENTITY_TABLES | ATTENDANCE_TABLES | {"alembic_version"}
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT name FROM attendance_series").fetchall() == [
+            ("Practice",)
+        ]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

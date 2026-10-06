@@ -53,6 +53,36 @@ def callback_update(
     )
 
 
+def group_update(
+    telegram_user_id,
+    *,
+    chat_id=-100,
+    chat_type="supergroup",
+    title="Samba Group",
+    sender_chat=None,
+    migrate_to_chat_id=None,
+    migrate_from_chat_id=None,
+):
+    """A group message. Telegram fills from_user and sender_chat; the sender cannot fake them."""
+    chat = SimpleNamespace(id=chat_id, type=chat_type, title=title)
+    sender = None if telegram_user_id is None else user(telegram_user_id, None)
+    message = SimpleNamespace(
+        reply_text=AsyncMock(return_value=SimpleNamespace(message_id=next(_message_ids))),
+        chat=chat,
+        from_user=sender,
+        sender_chat=sender_chat,
+        migrate_to_chat_id=migrate_to_chat_id,
+        migrate_from_chat_id=migrate_from_chat_id,
+        message_id=next(_message_ids),
+    )
+    return SimpleNamespace(
+        effective_chat=chat,
+        effective_message=message,
+        effective_user=sender,
+        callback_query=None,
+    )
+
+
 def context():
     return SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
 

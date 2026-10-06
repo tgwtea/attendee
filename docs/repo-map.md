@@ -27,7 +27,8 @@ Update this file when the repository structure changes.
 │       ├── 0001_identity.py
 │       ├── 0002_import_matching.py
 │       ├── 0003_candidate_rejected.py
-│       └── 0004_attendance.py
+│       ├── 0004_attendance.py
+│       └── 0005_organization_chats.py
 ├── scripts/entrypoint.sh
 ├── src/attendee/
 │   ├── __init__.py
@@ -44,6 +45,7 @@ Update this file when the repository structure changes.
 │   │   ├── bootstrap.py
 │   │   ├── messages.py
 │   │   ├── attendance.py
+│   │   ├── chats.py
 │   │   ├── onboarding.py
 │   │   └── uploads.py
 │   ├── persistence/
@@ -61,6 +63,7 @@ Update this file when the repository structure changes.
 │   │   ├── memberships.py
 │   │   ├── attendance.py
 │   │   ├── authorization.py
+│   │   ├── chats.py
 │   │   ├── bootstrap.py
 │   │   ├── import_files.py
 │   │   ├── imports.py
@@ -69,12 +72,14 @@ Update this file when the repository structure changes.
 │   │   ├── __init__.py
 │   │   ├── identity.py
 │   │   ├── attendance.py
+│   │   ├── chats.py
 │   │   ├── imports.py
 │   │   └── matching.py
 │   ├── repositories/
 │   │   ├── __init__.py
 │   │   ├── identity.py
 │   │   ├── attendance.py
+│   │   ├── chats.py
 │   │   └── matching.py
 │   └── reporting/
 │       ├── __init__.py
@@ -92,6 +97,7 @@ Update this file when the repository structure changes.
 │   ├── test_matching.py
 │   ├── test_attendance.py
 │   ├── test_attendance_conversation.py
+│   ├── test_chats.py
 │   ├── test_onboarding.py
 │   ├── test_uploads.py
 │   └── telegram_fakes.py
@@ -114,15 +120,15 @@ Update this file when the repository structure changes.
 | `.env.example`, `.gitignore`, `.dockerignore` | Example settings and local/build exclusions |
 | `.github/workflows/ci.yml` | Automated dependency, lint, format, type, and test checks |
 | `Dockerfile`, `compose.yaml`, `scripts/entrypoint.sh` | Container build, persistent volume, and migration-first startup |
-| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, `0003_candidate_rejected`, and `0004_attendance` revisions |
+| `alembic.ini`, `alembic/` | Async migrations; `0001_identity`, `0002_import_matching`, `0003_candidate_rejected`, `0004_attendance`, and `0005_organization_chats` revisions |
 | `src/attendee/main.py` | Explicit dependency construction and bot lifecycle |
 | `src/attendee/config/` | Validated environment settings |
 | `src/attendee/logging.py` | Standard logs with token redaction |
-| `src/attendee/telegram/` | Long-polling application, `/start` onboarding, namelist upload, private `/attendance` conversation, fixed texts |
-| `src/attendee/persistence/` | ORM metadata, identity and attendance models, UTC column type, SQLite engine, session factory |
-| `src/attendee/domain/` | Membership roles, slug and handle rules, import row validation, match outcomes, attendance names, dates, and status |
-| `src/attendee/application/` | Identity, membership, authorization, bootstrap, import, matching, and attendance operations; DTOs; errors |
-| `src/attendee/repositories/` | Organization, person, membership, unresolved match, and attendance queries, each organization-scoped where it applies |
+| `src/attendee/telegram/` | Long-polling application, `/start` onboarding, namelist upload, private `/attendance` conversation, group `/register`, fixed texts |
+| `src/attendee/persistence/` | ORM metadata, identity, chat, and attendance models, UTC column type, SQLite engine, session factory |
+| `src/attendee/domain/` | Membership roles, slug and handle rules, import row validation, match outcomes, attendance names, dates, and status, registrable chat types |
+| `src/attendee/application/` | Identity, membership, authorization, bootstrap, import, matching, attendance, and chat registration operations; DTOs; errors |
+| `src/attendee/repositories/` | Organization, person, membership, unresolved match, attendance, and chat queries, each organization-scoped where it applies |
 | `src/attendee/setup.py` | `attendee-setup` command for bootstrap admins |
 | `src/attendee/importer.py` | `attendee-import` command: preview or apply a namelist |
 | `src/attendee/backup.py` | Safe local backups and retention |
@@ -130,4 +136,4 @@ Update this file when the repository structure changes.
 | `tests/` | Tests with temporary migrated databases and fake Telegram updates; no live Telegram account |
 
 Local `.venv/`, `.env`, caches, and `data/` are ignored. Docker stores runtime data in a named volume.
-Draft attendance creation exists. Publication, responses, reminders, closure, calculations, and exports remain deferred.
+Draft attendance creation and group registration exist. Publication, responses, reminders, closure, calculations, and exports remain deferred.

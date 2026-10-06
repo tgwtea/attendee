@@ -1,4 +1,4 @@
-"""ORM records for organization identity, unresolved matches, and attendance."""
+"""ORM records for organization identity, unresolved matches, chats, and attendance."""
 
 from datetime import date, datetime
 
@@ -173,6 +173,33 @@ class AttendanceSession(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     creation_key: Mapped[str] = mapped_column(String(64))
     request_fingerprint: Mapped[str] = mapped_column(String(64))
+
+
+class OrganizationChat(Base):
+    """A Telegram group that one organization registered. A group has one owner globally."""
+
+    __tablename__ = "organization_chats"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id", name="uq_organization_chats_org_id"),
+        UniqueConstraint("telegram_chat_id", name="uq_organization_chats_telegram_chat_id"),
+        CheckConstraint("chat_type IN ('group', 'supergroup')", name="valid_chat_type"),
+        CheckConstraint("length(title) BETWEEN 1 AND 200", name="valid_title"),
+        ForeignKeyConstraint(
+            ["organization_id", "registered_by"],
+            ["memberships.organization_id", "memberships.person_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT")
+    )
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger)
+    chat_type: Mapped[str] = mapped_column(String(10))
+    title: Mapped[str] = mapped_column(String(200))
+    registered_by: Mapped[int]
+    registered_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, onupdate=utc_now)
 
 
 class SessionRosterEntry(Base):

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee.application.attendance import AttendanceService
 from attendee.application.authorization import AuthorizationService
+from attendee.application.chats import ChatRegistrationService
 from attendee.application.dto import OrganizationDTO
 from attendee.application.identity import IdentityService
 from attendee.application.imports import ImportService
@@ -18,6 +19,7 @@ from attendee.logging import configure_logging
 from attendee.persistence.database import create_engine, create_session_factory
 from attendee.telegram.attendance import AttendanceHandlers
 from attendee.telegram.bootstrap import BotHandler, bot_handlers, build_application
+from attendee.telegram.chats import ChatHandlers
 from attendee.telegram.onboarding import OnboardingHandlers
 from attendee.telegram.uploads import UploadHandlers
 
@@ -55,6 +57,11 @@ def create_handlers(
             AuthorizationService(session_factory),
             AttendanceService(session_factory),
             timezone,
+        ),
+        ChatHandlers(
+            organization_id,
+            IdentityService(session_factory),
+            ChatRegistrationService(session_factory),
         ),
     )
 

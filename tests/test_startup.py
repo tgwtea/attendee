@@ -39,6 +39,8 @@ def test_registered_handlers():
         "CallbackQueryHandler",
         "MessageHandler",
         "CallbackQueryHandler",
+        "CommandHandler",
+        "MessageHandler",
     ]
 
 

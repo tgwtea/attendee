@@ -31,6 +31,19 @@ APPLY_REJECTED = (
     "Nothing applied. The preview has rejected rows. Fix them and upload the file again."
 )
 
+REGISTER_ANONYMOUS = (
+    "The bot cannot see who sent this command. "
+    'Turn off "Remain anonymous" in your admin rights, then send /register again.'
+)
+REGISTER_DENIED = (
+    "Only an admin of this organization who is also an admin of this group can register it."
+)
+REGISTER_CHECK_FAILED = "The bot could not check your role in this group. Try again later."
+REGISTER_FAILED = "The registration failed. Send /register to try again."
+REGISTERED = "This group is now registered for attendance polls."
+REGISTER_REFRESHED = "This group is already registered for attendance polls."
+REGISTER_TAKEN = "Another organization already registered this group."
+
 
 def confirm_name(name: str) -> str:
     return f"Are you {name}?"
