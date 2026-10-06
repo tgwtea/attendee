@@ -12,7 +12,7 @@ The PRD sets these decisions. Change them only through a PRD change.
 | P2 | The bot collects reasons privately. Reasons never appear in the group. | PRD §14, §26 |
 | P3 | Attendance is binary: Coming is `1`, every other status is `0`. Status and reason are kept. | PRD §7 |
 | P4 | `No Response` is distinct from absence. | PRD §9, §21, §22 |
-| P5 | Deadlines are soft. A deadline never closes a poll. | PRD §11, §33 |
+| P5 | Deadlines are soft. A deadline never closes a poll. Seven days after its deadline, a session is archived, whatever its status: it leaves every list and takes no response, but its data stays for admin export. A deadline is never later than the session date. | PRD §11, §33 (changed 2026-10-06) |
 | P6 | Only an admin closes a poll, manually, after confirmation. | PRD §22 |
 | P7 | Admins are a configurable list. No code change is needed to add or remove one. | PRD §25 |
 | P8 | The Telegram user ID becomes the durable member identity after matching. | PRD §17, §31 |
@@ -24,11 +24,12 @@ The PRD sets these decisions. Change them only through a PRD change.
 | P14 | A reminder that members see shows no counts. Only admins see outstanding counts. | PRD §24, §26 (clarified 2026-10-04) |
 | P15 | A reasons export gives each member one cell of comma-separated values: `<session date> (<session label>) <reason>`, or `NA`. The export replaces a comma inside one reason with `;`. Storage keeps one reason per response, as typed. | PRD §10 (clarified 2026-10-04) |
 | P16 | The previous response stays active until a replacement reason arrives. A member without a previous response stays `No Response`. | PRD §23 (clarified 2026-10-04) |
+| P17 | A member confirms a change to a saved response before the bot replaces it. | PRD §23 (clarified 2026-10-06) |
 
 ## Accepted technical decisions
 
 All entries below have status **Accepted**.
-T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**. T50–T54 date from **2026-10-06**.
+T1–T32 date from **2026-10-04**. T33–T49 date from **2026-10-05**. T50–T71 date from **2026-10-06**.
 The finalized MVP stack supplies these choices. Product behavior remains subject to the PRD.
 
 | ID | Choice | Reason and consequence |
@@ -101,3 +102,7 @@ The finalized MVP stack supplies these choices. Product behavior remains subject
 | T65 | Deep link to the private chat | The answer to a non-Coming tap opens `t.me/<bot>?start=reason`. The fixed payload `reason` carries no data. `/start reason` with no pending tap replies "No response is waiting for a reason. Tap a button on the group poll first." |
 | T66 | Reason handling | The reason handler comes first in the handler list, before `/attendance`. A filter makes it match only users with a pending tap. A blank or over-long reason keeps the pending tap and asks again. A database failure keeps the pending tap and asks again. The bot confirms only after commit (PRD §36). The bot never logs a reason. |
 | T67 | Response checks | `record` checks again in one `BEGIN IMMEDIATE` transaction: the Telegram user is linked, the session is Open in this organization, and the person is on the roster. A missed deadline does not block. A repeat of the same status and reason writes nothing. A Draft, Closed, or unknown session gets the PRD §34 "poll closed" text. A person outside the roster gets "You are not on the list for this session." |
+| T68 | Tap twice to change a response | A tap whose status differs from the saved status saves nothing and opens nothing. It shows a pop-up that names both statuses and arms the change for 60 seconds. A second tap of the same button in that time continues as T63 or T64. A late tap or another button arms again. A tap with no saved response, or with the same status, needs no confirmation. The armed change lives in process memory, like T64 (user decision on 2026-10-06). |
+| T69 | Derived archive, no deletion | A session is archived when its deadline is more than 7 days (`ARCHIVE_AFTER`) before the read time, in any status. Like `Deadline Passed` (T49), the archive is derived: no column, no migration, no scheduler (T8), and no data changes. `display_status` shows `Archived`. `/publish` lists no archived Draft and refuses to publish one. A response to an archived session gets the "poll closed" text. A read by session ID still works, so a later admin export includes archived sessions. The group poll message stays. This replaces an earlier same-day plan to hard-delete sessions (user decision on 2026-10-06). |
+| T70 | Deadline cap | The local deadline date in `APP_TIMEZONE` must not be after the session date. Any time on the session date is valid. Past deadlines stay valid (T42). `check_deadline` runs in the `/attendance` conversation, the only creation path. `SessionInput` has no timezone, so the service does not check again. |
+| T71 | One file for user-facing text | `src/attendee/copy.py` holds every text that a person sees from the bot, grouped by flow. `telegram/messages.py` re-exports it. Domain and application modules import it for user-facing error texts. Command-line output for operators and programming errors stay in their modules. |

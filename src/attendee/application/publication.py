@@ -13,10 +13,11 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from attendee import copy
 from attendee.application.authorization import AuthorizationService
 from attendee.application.chats import ChatDTO
 from attendee.application.errors import ApplicationError, NotFound
-from attendee.domain.attendance import SessionStatus
+from attendee.domain.attendance import SessionStatus, archive_cutoff, is_archived
 from attendee.domain.identity import MembershipRole
 from attendee.domain.publication import (
     PUBLISH_LEASE,
@@ -128,23 +129,32 @@ class PublicationService:
             await repository.session.flush()
 
     async def _require_draft(
-        self, session: AsyncSession, organization_id: int, session_id: int
+        self, session: AsyncSession, organization_id: int, session_id: int, now: datetime
     ) -> AttendanceSession:
         row = await AttendanceRepository(session, organization_id).get_session(session_id)
         if row is None:
-            raise NotFound("Session not found.")
+            raise NotFound(copy.SESSION_NOT_FOUND)
         if row.status != SessionStatus.DRAFT:
-            raise NotDraft("This session is no longer a Draft.")
+            raise NotDraft(copy.PUBLISH_NOT_DRAFT)
+        if is_archived(row.deadline, now):
+            raise NotDraft(copy.PUBLISH_ARCHIVED)
         return row
 
     async def list_drafts(
-        self, organization_id: int, actor_id: int, offset: int = 0, limit: int = 11
+        self,
+        organization_id: int,
+        actor_id: int,
+        offset: int = 0,
+        limit: int = 11,
+        now: datetime | None = None,
     ) -> list[DraftDTO]:
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError("Invalid session page.")
         async with self.session_factory() as session:
             await self._authorize(organization_id, actor_id, session)
-            rows = await PublicationRepository(session, organization_id).drafts(offset, limit)
+            rows = await PublicationRepository(session, organization_id).drafts(
+                offset, limit, archive_cutoff(now or datetime.now(UTC))
+            )
             attendance = AttendanceRepository(session, organization_id)
             result: list[DraftDTO] = []
             for row, attempt in rows:
@@ -175,7 +185,7 @@ class PublicationService:
         now = now or datetime.now(UTC)
         async with write_session(self.session_factory) as session:
             await self._authorize(organization_id, actor_id, session)
-            row = await self._require_draft(session, organization_id, session_id)
+            row = await self._require_draft(session, organization_id, session_id, now)
             await self._expire(PublicationRepository(session, organization_id), row.id, now)
             result = await self._draft(session, organization_id, row)
         return result
@@ -185,10 +195,10 @@ class PublicationService:
     ) -> PublicationReview:
         async with self.session_factory() as session:
             await self._authorize(organization_id, actor_id, session)
-            row = await self._require_draft(session, organization_id, session_id)
+            row = await self._require_draft(session, organization_id, session_id, datetime.now(UTC))
             chat = await ChatRepository(session, organization_id).get(chat_id)
             if chat is None:
-                raise NotFound("Group not found.")
+                raise NotFound(copy.PUBLISH_GROUP_NOT_FOUND)
             draft = await self._draft(session, organization_id, row)
             return PublicationReview(
                 draft=draft, chat=ChatDTO.model_validate(chat), text=self._text(draft)
@@ -232,10 +242,10 @@ class PublicationService:
         try:
             async with write_session(self.session_factory) as session:
                 await self._authorize(organization_id, actor_id, session)
-                row = await self._require_draft(session, organization_id, session_id)
+                row = await self._require_draft(session, organization_id, session_id, now)
                 chat = await ChatRepository(session, organization_id).get(chat_id)
                 if chat is None:
-                    raise NotFound("Group not found.")
+                    raise NotFound(copy.PUBLISH_GROUP_NOT_FOUND)
                 repository = PublicationRepository(session, organization_id)
                 await self._expire(repository, row.id, now)
                 active = await repository.active(row.id)
@@ -318,7 +328,7 @@ class PublicationService:
             await self._expire(repository, session_id, now)
             attempt = await repository.active(session_id)
             if attempt is None:
-                raise NotFound("No publication waits for a decision.")
+                raise NotFound(copy.PUBLISH_NOTHING_WAITING)
             if attempt.status == PublicationStatus.PUBLISH_UNKNOWN:
                 attempt.resolved_by = actor_id
                 if seen:

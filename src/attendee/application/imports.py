@@ -13,6 +13,7 @@ from enum import StrEnum
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from attendee import copy
 from attendee.application.errors import ImportConflict, ImportRejected, NotFound
 from attendee.domain.identity import MembershipRole
 from attendee.domain.imports import ImportRow, ParsedFile
@@ -210,7 +211,7 @@ def _plan_row(
             None,
         )
         if matched is None and row.telegram_user_id in outside_ids:
-            return reject("Telegram ID belongs to a person outside this organization")
+            return reject(copy.ROW_ID_OUTSIDE)
     holders = [
         member
         for member in members
@@ -219,16 +220,16 @@ def _plan_row(
     ]
     if matched is not None:
         if holders:
-            return reject("Another member of this organization has this handle")
+            return reject(copy.ROW_HANDLE_TAKEN)
     elif len(holders) > 1:
-        return reject("Several members of this organization have this handle")
+        return reject(copy.ROW_HANDLE_SHARED)
     elif holders:
         matched = holders[0]
         if row.telegram_user_id is not None and matched.telegram_user_id not in (
             None,
             row.telegram_user_id,
         ):
-            return reject("The member with this handle has a different Telegram ID")
+            return reject(copy.ROW_HANDLE_ID_MISMATCH)
     if matched is None:
         return RowPlan(row, RowAction.CREATE)
     changed = (
@@ -251,7 +252,7 @@ def _reject_shared_targets(plans: list[RowPlan]) -> tuple[RowPlan, ...]:
         if len(shared) > 1:
             rows_text = ", ".join(str(line) for line in shared)
             plan = RowPlan(
-                plan.row, RowAction.REJECT, reasons=(f"Rows {rows_text} match the same member",)
+                plan.row, RowAction.REJECT, reasons=(copy.ROW_SAME_MEMBER.format(rows=rows_text),)
             )
         result.append(plan)
     return tuple(result)

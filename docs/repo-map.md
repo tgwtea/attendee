@@ -37,6 +37,7 @@ Update this file when the repository structure changes.
 │   ├── main.py
 │   ├── logging.py
 │   ├── backup.py
+│   ├── copy.py
 │   ├── setup.py
 │   ├── importer.py
 │   ├── config/
@@ -112,6 +113,7 @@ Update this file when the repository structure changes.
 │   ├── test_responses.py
 │   ├── test_onboarding.py
 │   ├── test_uploads.py
+│   ├── test_copy.py
 │   └── telegram_fakes.py
 └── docs/
     ├── prd.md
@@ -136,7 +138,7 @@ Update this file when the repository structure changes.
 | `src/attendee/main.py` | Explicit dependency construction and bot lifecycle |
 | `src/attendee/config/` | Validated environment settings |
 | `src/attendee/logging.py` | Standard logs with token redaction |
-| `src/attendee/telegram/` | Long-polling application, `/start` onboarding, namelist upload, private `/attendance` conversation, group `/register`, fixed texts |
+| `src/attendee/telegram/` | Long-polling application, `/start` onboarding, namelist upload, private `/attendance` conversation, group `/register`, `/publish`, poll responses; `messages.py` re-exports `copy.py` |
 | `src/attendee/persistence/` | ORM metadata, identity, chat, and attendance models, UTC column type, SQLite engine, session factory |
 | `src/attendee/domain/` | Membership roles, slug and handle rules, import row validation, match outcomes, attendance names, dates, and status, registrable chat types |
 | `src/attendee/application/` | Identity, membership, authorization, bootstrap, import, matching, attendance, and chat registration operations; DTOs; errors |
@@ -144,6 +146,7 @@ Update this file when the repository structure changes.
 | `src/attendee/setup.py` | `attendee-setup` command for bootstrap admins |
 | `src/attendee/importer.py` | `attendee-import` command: preview or apply a namelist |
 | `src/attendee/backup.py` | Safe local backups and retention |
+| `src/attendee/copy.py` | Every user-facing bot text, in one file to edit |
 | `reporting/` | Plain-text import preview for admins |
 | `tests/` | Tests with temporary migrated databases and fake Telegram updates; no live Telegram account |
 

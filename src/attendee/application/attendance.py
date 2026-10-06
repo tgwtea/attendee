@@ -7,6 +7,7 @@ from typing import Self
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from attendee import copy
 from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import ApplicationError, NotFound
 from attendee.domain.attendance import (
@@ -117,7 +118,7 @@ class AttendanceService:
         name = clean_name(name)
         normalized = normalize_series_name(name)
         if await repository.series_by_name(normalized) is not None:
-            raise DuplicateSeries("This series already exists. Select it from the list.")
+            raise DuplicateSeries(copy.SERIES_EXISTS)
         row = AttendanceSeries(
             organization_id=repository.organization_id,
             name=name,
@@ -144,13 +145,13 @@ class AttendanceService:
             if request.series_id is not None:
                 series = await repository.series(request.series_id)
                 if series is None:
-                    raise NotFound("Series not found.")
+                    raise NotFound(copy.SERIES_NOT_FOUND)
                 name = series.name
             else:
                 assert request.new_series_name is not None
                 name = request.new_series_name
                 if await repository.series_by_name(normalize_series_name(name)) is not None:
-                    raise DuplicateSeries("This series already exists. Select it from the list.")
+                    raise DuplicateSeries(copy.SERIES_EXISTS)
             return SessionPreview(
                 request=request, series_name=name, person_ids=await repository.required_people()
             )
@@ -166,15 +167,15 @@ class AttendanceService:
             existing = await repository.session_by_key(request.creation_key)
             if existing is not None:
                 if existing.created_by != actor_id or existing.request_fingerprint != fingerprint:
-                    raise CreationConflict("This creation key belongs to another request.")
+                    raise CreationConflict(copy.SESSION_KEY_CONFLICT)
                 return await self._result(repository, existing)
             people = await repository.required_people()
             if people != preview.person_ids:
-                raise RosterChanged("The roster changed. Confirm the new summary.")
+                raise RosterChanged(copy.SESSION_ROSTER_CHANGED)
             if request.series_id is not None:
                 series = await repository.series(request.series_id)
                 if series is None:
-                    raise NotFound("Series not found.")
+                    raise NotFound(copy.SERIES_NOT_FOUND)
             else:
                 assert request.new_series_name is not None
                 series = await self._add_series(repository, actor_id, request.new_series_name)
@@ -201,7 +202,7 @@ class AttendanceService:
             repository = AttendanceRepository(session, organization_id)
             row = await repository.get_session(session_id)
             if row is None:
-                raise NotFound("Session not found.")
+                raise NotFound(copy.SESSION_NOT_FOUND)
             return await self._result(repository, row, now)
 
     async def _result(

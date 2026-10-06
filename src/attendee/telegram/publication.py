@@ -104,9 +104,9 @@ def parse_callback(data: str | None) -> tuple[str, str, int | None] | None:
 def _session_label(draft: DraftDTO) -> str:
     text = f"{draft.series_name} · {draft.label or draft.session_date.isoformat()}"
     if draft.publication is PublicationStatus.PUBLISH_UNKNOWN:
-        return f"{text} (check)"
+        return messages.PUBLISH_SESSION_CHECK.format(session=text)
     if draft.publication is PublicationStatus.PUBLISHING:
-        return f"{text} (publishing)"
+        return messages.PUBLISH_SESSION_BUSY.format(session=text)
     return text
 
 
@@ -263,7 +263,7 @@ class PublicationHandlers:
                     update,
                     pending,
                     Step.CONFIRM,
-                    f"Group: {review.chat.title}\n\n{review.text}\n\n{messages.PUBLISH_CONFIRM}",
+                    messages.PUBLISH_REVIEW.format(group=review.chat.title, poll=review.text),
                     [(messages.PUBLISH, "y", None)],
                 )
             elif action == "y":

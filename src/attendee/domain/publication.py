@@ -4,6 +4,8 @@ from datetime import date, datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
+from attendee import copy
+
 
 class PublicationStatus(StrEnum):
     """One attempt to post a session poll. Session status stays draft, open, or closed."""
@@ -38,10 +40,9 @@ def poll_text(
     local = deadline.astimezone(ZoneInfo(timezone))
     hour = local.strftime("%I").lstrip("0")
     day = f"{session_date:%A}, {session_date.day} {session_date:%B %Y}"
-    return (
-        f"Attendance — {series_name}\n\n"
-        f"{label or day}\n"
-        f"Please respond by {local:%A}, {local.day} {local:%B %Y} "
-        f"at {hour}:{local:%M %p} ({timezone}).\n\n"
-        "Your attendance response is private."
+    return copy.POLL_TEXT.format(
+        series=series_name,
+        session=label or day,
+        deadline=f"{local:%A}, {local.day} {local:%B %Y} at {hour}:{local:%M %p}",
+        timezone=timezone,
     )

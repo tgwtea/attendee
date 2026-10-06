@@ -9,6 +9,7 @@ from pathlib import PurePath
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
+from attendee import copy
 from attendee.domain.imports import ImportFileError, ParsedFile, RawTable, read_table
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -22,7 +23,7 @@ def parse_file(filename: str, data: bytes) -> ParsedFile:
         return parse_csv(data)
     if suffix == ".xlsx":
         return parse_xlsx(data)
-    raise ImportFileError(f"Use a {' or '.join(SUFFIXES)} file")
+    raise ImportFileError(copy.FILE_WRONG_TYPE.format(suffixes=" or ".join(SUFFIXES)))
 
 
 def parse_csv(data: bytes) -> ParsedFile:
@@ -30,11 +31,11 @@ def parse_csv(data: bytes) -> ParsedFile:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise ImportFileError("Save the CSV file as UTF-8") from exc
+        raise ImportFileError(copy.FILE_NOT_UTF8) from exc
     try:
         lines = list(csv.reader(io.StringIO(text, newline="")))
     except csv.Error as exc:
-        raise ImportFileError(f"The CSV file is not valid: {exc}") from exc
+        raise ImportFileError(copy.FILE_BAD_CSV.format(detail=exc)) from exc
     return read_table(_table(lines))
 
 
@@ -44,7 +45,7 @@ def parse_xlsx(data: bytes) -> ParsedFile:
     try:
         workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except (InvalidFileException, zipfile.BadZipFile, KeyError, OSError) as exc:
-        raise ImportFileError("The XLSX file is not valid") from exc
+        raise ImportFileError(copy.FILE_BAD_XLSX) from exc
     try:
         sheet = workbook.worksheets[0]
         lines = [[_cell_text(value) for value in row] for row in sheet.iter_rows(values_only=True)]
@@ -55,12 +56,12 @@ def parse_xlsx(data: bytes) -> ParsedFile:
 
 def _check_size(data: bytes) -> None:
     if len(data) > MAX_FILE_BYTES:
-        raise ImportFileError(f"The file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB")
+        raise ImportFileError(copy.FILE_TOO_LARGE.format(megabytes=MAX_FILE_BYTES // (1024 * 1024)))
 
 
 def _table(lines: list[list[str]]) -> RawTable:
     if not lines:
-        raise ImportFileError("The file is empty")
+        raise ImportFileError(copy.FILE_EMPTY)
     return RawTable(tuple(lines[0]), tuple(tuple(line) for line in lines[1:]))
 
 

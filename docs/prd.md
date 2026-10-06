@@ -402,6 +402,8 @@ The deadline is a **soft deadline**.
 
 The poll does **not automatically close** when this deadline passes.
 
+**Clarification (2026-10-06):** The deadline cannot be later than the session date. Any time on the session date is valid. The bot asks again for a deadline that is too late.
+
 ### Step 5 — Confirmation
 
 The bot displays a summary before publication.
@@ -655,6 +657,8 @@ Admins can then send reminders.
 
 The poll remains open indefinitely until an authorised admin manually closes it.
 
+**Change (2026-10-06):** "Indefinitely" now ends 7 days after the deadline. Then the session is archived, whether it is Open or Closed. Members can no longer respond, and the bot stops showing it in lists. Its responses, reasons, and history stay, and admins can still export them.
+
 ---
 
 # 22. Closing a Poll
@@ -703,6 +707,8 @@ The system may retain an internal audit history, but the latest valid response b
 After the poll is closed, only admins should be able to change records.
 
 **Clarification (2026-10-04):** While a replacement reason is incomplete, the previous response stays the active record. Example: a member changes `Coming` to `Late` and sends no reason. The record stays `Coming` until the reason arrives. A member with no previous response stays `No Response`.
+
+**Clarification (2026-10-06):** A member with a saved response confirms a change first. The first tap on a different button shows a private pop-up, for example "You already said Coming. Tap Late again within 60 seconds to change your answer." Only a second tap of that button within 60 seconds continues.
 
 ---
 
@@ -1029,6 +1035,8 @@ Closed
 Members can still respond.
 
 The distinction simply allows the bot to notify administrators that the preferred response time has passed.
+
+**Change (2026-10-06):** 7 days after the deadline, a session in any status shows `Archived` (see §21). Members cannot respond to an archived session. Admins can still export it.
 
 ---
 

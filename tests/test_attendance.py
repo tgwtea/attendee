@@ -17,7 +17,7 @@ from attendee.application.errors import AccessDenied, NotFound
 from attendee.application.identity import IdentityService
 from attendee.application.memberships import MembershipService
 from attendee.application.organizations import OrganizationService
-from attendee.domain.attendance import SessionStatus, parse_date, parse_deadline
+from attendee.domain.attendance import SessionStatus, check_deadline, parse_date, parse_deadline
 from attendee.domain.identity import MembershipRole
 from attendee.persistence.database import create_engine, create_session_factory
 from attendee.persistence.models import (
@@ -156,6 +156,17 @@ async def test_deadline_read_does_not_change_status(attendance_club, session_fac
             .values(status="closed")
         )
     assert (await service.get_session(org.id, admin.id, saved.id, after)).display_status == "Closed"
+
+
+async def test_archived_after_a_week_in_any_status(attendance_club, archive_after):
+    org, admin, _, service = attendance_club
+    saved = await create(attendance_club)
+    week = saved.deadline + archive_after
+    assert (await service.get_session(org.id, admin.id, saved.id, week)).display_status == "Draft"
+    later = week + timedelta(seconds=1)
+    read = await service.get_session(org.id, admin.id, saved.id, later)
+    # Archived is derived. The stored status and the session stay for export.
+    assert (read.display_status, read.status) == ("Archived", SessionStatus.DRAFT)
 
 
 async def test_authorization_on_every_operation(attendance_club, session_factory):
@@ -300,6 +311,20 @@ def test_invalid_dates(value):
 def test_invalid_deadlines(value):
     with pytest.raises(ValueError):
         parse_deadline(value, "Asia/Singapore")
+
+
+def test_deadline_not_after_session_date():
+    session_date = date(2026, 10, 13)
+    # Any local time on the session date is valid, and so is a past date.
+    check_deadline(
+        parse_deadline("13 Oct 2026 23:59", "Asia/Singapore"), session_date, "Asia/Singapore"
+    )
+    check_deadline(
+        parse_deadline("1 Jan 2020 09:00", "Asia/Singapore"), session_date, "Asia/Singapore"
+    )
+    # 2026-10-13 16:30 UTC is already 14 October in Singapore.
+    with pytest.raises(ValueError, match="2026-10-13"):
+        check_deadline(datetime(2026, 10, 13, 16, 30, tzinfo=UTC), session_date, "Asia/Singapore")
 
 
 @pytest.mark.parametrize("value", ["2026-03-08 02:30", "2026-11-01 01:30"])

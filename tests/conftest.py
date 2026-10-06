@@ -2,11 +2,13 @@
 
 import os
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from attendee.config.settings import Settings
+from attendee.domain import attendance as attendance_domain
 from attendee.persistence.database import create_engine, create_session_factory
 
 
@@ -24,6 +26,26 @@ def isolated_environment(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.chdir(tmp_path)
+
+
+REAL_ARCHIVE_AFTER = attendance_domain.ARCHIVE_AFTER
+
+
+@pytest.fixture(autouse=True)
+def no_archive_by_default(monkeypatch):
+    """Fixtures use fixed 2026 deadlines, and services read the real clock.
+
+    Without this, every test that reaches an archive check would fail 7 days after those
+    deadlines. Tests of archiving request the `archive_after` fixture instead.
+    """
+    monkeypatch.setattr(attendance_domain, "ARCHIVE_AFTER", timedelta(days=365 * 100))
+
+
+@pytest.fixture
+def archive_after(monkeypatch):
+    """Restore the real archive delay for this test. Pass explicit times to the services."""
+    monkeypatch.setattr(attendance_domain, "ARCHIVE_AFTER", REAL_ARCHIVE_AFTER)
+    return REAL_ARCHIVE_AFTER
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -108,8 +108,8 @@ def test_poll_text_follows_prd_and_has_no_counts():
     assert text == (
         "Attendance — Patrons Day\n\n"
         "Tuesday, 13 October 2026\n"
-        "Please respond by Monday, 12 October 2026 at 8:00 PM (Asia/Singapore).\n\n"
-        "Your attendance response is private."
+        "Please reply by Monday, 12 October 2026 at 8:00 PM (Asia/Singapore).\n\n"
+        "Your answer is private. Only admins see it."
     )
     labelled = poll_text(
         "Prac",
@@ -130,7 +130,7 @@ async def test_publish_opens_session(ready, service, session_factory):
     result = await service.publish(org.id, admin.id, draft.id, chat.id, publisher, NOW)
     assert result.outcome is PublishOutcome.PUBLISHED
     assert [(sent[0], sent[2]) for sent in publisher.sent] == [(-100, draft.id)]
-    assert "Your attendance response is private." in publisher.sent[0][1]
+    assert "Your answer is private." in publisher.sent[0][1]
     assert await attempts(session_factory) == [("published", 501, None)]
     assert await session_status(session_factory, draft.id) == SessionStatus.OPEN
     # An Open session is no longer a Draft. Nothing sends again.
@@ -307,6 +307,15 @@ async def test_list_drafts_shows_attempt_state(ready, service, attendance_club):
     await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(PublishUnknown()), NOW)
     drafts = {row.id: row.publication for row in await service.list_drafts(org.id, admin.id)}
     assert drafts == {draft.id: PublicationStatus.PUBLISH_UNKNOWN, second.id: None}
+
+
+async def test_archived_draft_is_hidden_and_cannot_publish(ready, service, archive_after):
+    org, admin, draft, chat = ready
+    archived = draft.deadline + archive_after + timedelta(seconds=1)
+    assert [row.id for row in await service.list_drafts(org.id, admin.id, now=NOW)] == [draft.id]
+    assert await service.list_drafts(org.id, admin.id, now=archived) == []
+    with pytest.raises(NotDraft, match="archived"):
+        await service.publish(org.id, admin.id, draft.id, chat.id, FakePublisher(), archived)
 
 
 @pytest.mark.parametrize(

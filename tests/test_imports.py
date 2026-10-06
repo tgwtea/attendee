@@ -6,6 +6,7 @@ import pytest
 from openpyxl import Workbook
 from sqlalchemy import func, select
 
+from attendee import copy
 from attendee.application.errors import ImportConflict, ImportRejected
 from attendee.application.identity import IdentityService
 from attendee.application.import_files import parse_csv, parse_file, parse_xlsx
@@ -139,16 +140,16 @@ async def test_telegram_id_matches_before_handle(service, organization, session_
 @pytest.mark.parametrize(
     ("rows", "header", "reason"),
     [
-        ([["", "@johntan"]], HEADER, "Missing name"),
-        ([["John", ""]], HEADER, "Missing Telegram handle"),
-        ([["John", "@x"]], HEADER, "Invalid Telegram handle"),
-        ([["A", "@johntan"], ["B", "@JohnTan"]], HEADER, "Duplicate handle in file"),
+        ([["", "@johntan"]], HEADER, "the name is missing"),
+        ([["John", ""]], HEADER, "the Telegram handle is missing"),
+        ([["John", "@x"]], HEADER, "is not a valid Telegram handle"),
+        ([["A", "@johntan"], ["B", "@JohnTan"]], HEADER, "the same handle is in rows"),
         (
             [["A", "@alpha", "5"], ["B", "@bravo", "5"]],
             [*HEADER, "Telegram ID"],
-            "Duplicate Telegram ID in file",
+            "the same Telegram ID is in rows",
         ),
-        ([["A", "@alpha", "-5"]], [*HEADER, "Telegram ID"], "Invalid Telegram ID"),
+        ([["A", "@alpha", "-5"]], [*HEADER, "Telegram ID"], "is not a valid Telegram ID"),
     ],
 )
 async def test_validation_errors_apply_nothing(
@@ -186,10 +187,10 @@ async def test_handle_conflicts_with_existing_members(service, organization, ses
     assert [plan.action for plan in preview.plans] == [RowAction.REJECT] * 4
     reasons = [plan.reasons[0] for plan in preview.plans]
     assert reasons == [
-        "Another member of this organization has this handle",
-        "Several members of this organization have this handle",
-        "Telegram ID belongs to a person outside this organization",
-        "The member with this handle has a different Telegram ID",
+        copy.ROW_HANDLE_TAKEN,
+        copy.ROW_HANDLE_SHARED,
+        copy.ROW_ID_OUTSIDE,
+        copy.ROW_HANDLE_ID_MISMATCH,
     ]
     before = await counts(session_factory)
     with pytest.raises(ImportRejected):
@@ -206,14 +207,14 @@ async def test_two_rows_matching_one_member_are_rejected(service, organization, 
     preview = await service.preview(
         organization.id, parse_csv(csv_bytes(rows, [*HEADER, "Telegram ID"]))
     )
-    assert {plan.reasons for plan in preview.plans} == {("Rows 2, 3 match the same member",)}
+    assert {plan.reasons for plan in preview.plans} == {(copy.ROW_SAME_MEMBER.format(rows="2, 3"),)}
 
 
 @pytest.mark.parametrize(
     ("data", "message"),
     [
-        (b"Name,Section\nJohn,Bells\n", "Missing required columns: Telegram Handle"),
-        (b"Telegram Handle\n@john\n", "Missing required columns: Name"),
+        (b"Name,Section\nJohn,Bells\n", "these columns are missing: Telegram Handle"),
+        (b"Telegram Handle\n@john\n", "these columns are missing: Name"),
         (b"Name,Telegram Handle\n", "no member rows"),
         (b"", "empty"),
         (b"Name,name,Telegram Handle\n", "more than once"),
@@ -289,7 +290,7 @@ def test_import_command_previews_then_applies(migrated_settings, tmp_path, monke
     path = tmp_path / "namelist.xlsx"
     path.write_bytes(xlsx_bytes(NAMELIST))
     main(["--organization", "club", str(path)])
-    assert "Create: 3" in capsys.readouterr().out
+    assert "New: 3" in capsys.readouterr().out
     assert member_count() == 0
     main(["--organization", "club", "--apply", str(path)])
     assert "Applied." in capsys.readouterr().out
@@ -297,13 +298,13 @@ def test_import_command_previews_then_applies(migrated_settings, tmp_path, monke
     renamed = tmp_path / "renamed.csv"
     renamed.write_bytes(csv_bytes([["Sarah Lim", "@sarah_new"]]))
     main(["--organization", "club", str(renamed)])
-    assert "warning row 2: an existing member is also named Sarah Lim" in capsys.readouterr().out
+    assert "check row 2: someone named Sarah Lim is already on the list" in capsys.readouterr().out
     bad = tmp_path / "bad.csv"
     bad.write_bytes(csv_bytes([["", "@nobody"]]))
     with pytest.raises(SystemExit) as exit_info:
         main(["--organization", "club", "--apply", str(bad)])
     assert exit_info.value.code == 2
-    assert "Missing name" in capsys.readouterr().out
+    assert "the name is missing" in capsys.readouterr().out
     assert member_count() == 3
     with pytest.raises(SystemExit) as exit_info:
         main(["--organization", "missing", str(path)])

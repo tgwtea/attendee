@@ -29,12 +29,11 @@ from attendee.application.attendance import (
 from attendee.application.authorization import AuthorizationService
 from attendee.application.errors import AccessDenied, ApplicationError
 from attendee.application.identity import IdentityService
-from attendee.domain.attendance import clean_name, parse_date, parse_deadline
+from attendee.domain.attendance import check_deadline, clean_name, parse_date, parse_deadline
 from attendee.domain.identity import MembershipRole
+from attendee.telegram import messages
 
 CALLBACK_PATTERN = r"^a:"
-EXPIRED = "This button expired. Use the current prompt or send /attendance again."
-DENIED = "Only an admin of this organization can create attendance."
 
 
 class Step(IntEnum):
@@ -126,7 +125,7 @@ class AttendanceHandlers:
     async def _actor(self, user_id: int) -> int:
         person = await self.identity.find_by_telegram_user_id(user_id)
         if person is None:
-            raise AccessDenied(DENIED)
+            raise AccessDenied(messages.SESSION_DENIED)
         await self.authorization.require_role(self.organization_id, person.id, MembershipRole.ADMIN)
         return person.id
 
@@ -142,7 +141,7 @@ class AttendanceHandlers:
         assert message is not None
         pending.step = step
         pending.token = secrets.token_urlsafe(12)
-        choices = list(buttons or []) + [("Cancel", "c", None)]
+        choices = list(buttons or []) + [(messages.CANCEL, "c", None)]
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton(label, callback_data=callback(pending.token, action, value))]
@@ -163,14 +162,14 @@ class AttendanceHandlers:
         ]
         pending.offered_pages = set()
         if page:
-            buttons.append(("Previous", "p", page - 1))
+            buttons.append((messages.PREVIOUS, "p", page - 1))
             pending.offered_pages.add(page - 1)
         if len(series) > 10:
-            buttons.append(("Next", "p", page + 1))
+            buttons.append((messages.NEXT, "p", page + 1))
             pending.offered_pages.add(page + 1)
-        buttons.append(("Create new series", "n", None))
+        buttons.append((messages.SESSION_NEW_SERIES_BUTTON, "n", None))
         return await self._prompt(
-            update, pending, Step.SERIES, notice + "Select an attendance series.", buttons
+            update, pending, Step.SERIES, notice + messages.SESSION_SELECT_SERIES, buttons
         )
 
     async def start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> int:
@@ -185,7 +184,7 @@ class AttendanceHandlers:
             return await self._series(update, pending, actor)
         except AccessDenied:
             self.pending.pop(key, None)
-            await update.effective_message.reply_text(DENIED)
+            await update.effective_message.reply_text(messages.SESSION_DENIED)
             return ConversationHandler.END
         except SQLAlchemyError:
             return await self._database_failure(update, key)
@@ -194,9 +193,7 @@ class AttendanceHandlers:
         self.pending.pop(key, None)
         logging.getLogger(__name__).error("Attendance database operation failed")
         if update.effective_message is not None:
-            await update.effective_message.reply_text(
-                "The attendance operation failed. Send /attendance to try again."
-            )
+            await update.effective_message.reply_text(messages.SESSION_FAILED)
         return ConversationHandler.END
 
     async def cancel(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> int:
@@ -204,12 +201,12 @@ class AttendanceHandlers:
         if key is not None:
             self.pending.pop(key, None)
             if update.effective_message is not None:
-                await update.effective_message.reply_text("Cancelled. Nothing created.")
+                await update.effective_message.reply_text(messages.SESSION_CANCELLED)
         return ConversationHandler.END
 
     async def expired(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query is not None:
-            await update.callback_query.answer(EXPIRED, show_alert=True)
+            await update.callback_query.answer(messages.SESSION_BUTTON_EXPIRED, show_alert=True)
 
     async def text(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> int | None:
         key = self._key(update)
@@ -225,17 +222,15 @@ class AttendanceHandlers:
             value = message.text
             if pending.step is Step.NAME:
                 pending.new_series_name = clean_name(value)
-                return await self._prompt(
-                    update, pending, Step.DATE, "Enter the session date: YYYY-MM-DD or 12 Oct 2026."
-                )
+                return await self._prompt(update, pending, Step.DATE, messages.SESSION_ASK_DATE)
             if pending.step is Step.DATE:
                 pending.session_date = parse_date(value)
                 return await self._prompt(
                     update,
                     pending,
                     Step.LABEL,
-                    "Enter a session label or press Skip.",
-                    [("Skip", "l", None)],
+                    messages.SESSION_ASK_LABEL,
+                    [(messages.SKIP, "l", None)],
                 )
             if pending.step is Step.LABEL:
                 pending.label = clean_name(value)
@@ -243,6 +238,7 @@ class AttendanceHandlers:
             if pending.step is Step.DEADLINE:
                 deadline = parse_deadline(value, self.timezone)
                 assert pending.session_date is not None
+                check_deadline(deadline, pending.session_date, self.timezone)
                 request = SessionInput(
                     series_id=pending.series_id,
                     new_series_name=pending.new_series_name,
@@ -252,10 +248,10 @@ class AttendanceHandlers:
                     creation_key=pending.creation_key,
                 )
                 return await self._summary(update, pending, actor, request)
-            await message.reply_text("Use a button on the current prompt, or send /cancel.")
+            await message.reply_text(messages.SESSION_USE_BUTTON)
         except AccessDenied:
             self.pending.pop(key, None)
-            await message.reply_text(DENIED)
+            await message.reply_text(messages.SESSION_DENIED)
             return ConversationHandler.END
         except DuplicateSeries as exc:
             assert actor is not None
@@ -273,8 +269,7 @@ class AttendanceHandlers:
             update,
             pending,
             Step.DEADLINE,
-            f"Enter the soft deadline in {self.timezone}.\n"
-            "Use YYYY-MM-DD HH:MM or 12 Oct 2026, 8:00 PM.",
+            messages.SESSION_ASK_DEADLINE.format(timezone=self.timezone),
         )
 
     async def _summary(
@@ -288,14 +283,17 @@ class AttendanceHandlers:
         preview = await self.attendance.preview_session(self.organization_id, actor, request)
         pending.preview = preview
         local = request.deadline.astimezone(ZoneInfo(self.timezone))
-        text = (
-            f"{notice}{preview.series_name}\nDate: {request.session_date.isoformat()}\n"
-            f"Label: {request.label or request.session_date.isoformat()}\n"
-            f"Soft deadline: {local:%Y-%m-%d %H:%M %z} ({self.timezone})\n"
-            f"Required members: {len(preview.person_ids)} (all memberships, including admins)\n"
-            "Status: Draft\nSave this Draft session?"
+        text = notice + messages.SESSION_SUMMARY.format(
+            series=preview.series_name,
+            date=request.session_date.isoformat(),
+            label=request.label or request.session_date.isoformat(),
+            deadline=f"{local:%Y-%m-%d %H:%M %z}",
+            timezone=self.timezone,
+            members=len(preview.person_ids),
         )
-        return await self._prompt(update, pending, Step.CONFIRM, text, [("Confirm", "y", None)])
+        return await self._prompt(
+            update, pending, Step.CONFIRM, text, [(messages.CONFIRM, "y", None)]
+        )
 
     async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
         query = update.callback_query
@@ -345,14 +343,12 @@ class AttendanceHandlers:
             if action == "n":
                 pending.series_id = None
                 return await self._prompt(
-                    update, pending, Step.NAME, "Enter a new series name (1 to 200 characters)."
+                    update, pending, Step.NAME, messages.SESSION_ASK_SERIES_NAME
                 )
             if action == "s":
                 pending.series_id = value
                 pending.new_series_name = None
-                return await self._prompt(
-                    update, pending, Step.DATE, "Enter the session date: YYYY-MM-DD or 12 Oct 2026."
-                )
+                return await self._prompt(update, pending, Step.DATE, messages.SESSION_ASK_DATE)
             if action == "l":
                 pending.label = None
                 return await self._deadline_prompt(update, pending)
@@ -367,15 +363,18 @@ class AttendanceHandlers:
                     pending,
                     actor,
                     pending.preview.request,
-                    "The roster changed. Confirm this new summary.\n",
+                    messages.SESSION_ROSTER_CHANGED + "\n",
                 )
             self.pending.pop(key, None)
             assert update.effective_message is not None
             await update.effective_message.reply_text(
-                f"Draft session #{result.id} saved.\n{result.series_name}\n"
-                f"{result.session_date.isoformat()} — "
-                f"{result.label or result.session_date.isoformat()}\n"
-                f"Required members: {len(result.person_ids)}"
+                messages.SESSION_SAVED.format(
+                    id=result.id,
+                    series=result.series_name,
+                    date=result.session_date.isoformat(),
+                    label=result.label or result.session_date.isoformat(),
+                    members=len(result.person_ids),
+                )
             )
             return ConversationHandler.END
         except DuplicateSeries as exc:
@@ -384,7 +383,7 @@ class AttendanceHandlers:
             pending.new_series_name = None
             return await self._series(update, pending, actor, notice=f"{exc}\n")
         except AccessDenied:
-            text = DENIED
+            text = messages.SESSION_DENIED
         except ApplicationError as exc:
             text = str(exc)
         except SQLAlchemyError:

@@ -218,11 +218,24 @@ A member on the session roster taps a poll button in the group. The group never 
 
 - **Coming** saves at once. A pop-up that only the member sees confirms it.
 - **Not Coming**, **Late**, and **Leaving Early** open the private chat with the bot. The member sends a reason of at most 1000 characters. The bot saves the response only when the reason arrives.
+- A tap that changes a saved response asks first. The member taps the same button again within 60 seconds to confirm.
 - A new tap replaces the previous one. A repeated tap changes nothing. The latest saved response is the current one.
 - A bot restart forgets a tap that waits for a reason. The member taps again.
 - A missed deadline does not block a response. A Draft or Closed session does.
 
 Admin resolution of unresolved identity matches remains necessary before a real rollout.
+
+## Edit the bot text
+
+Every text that the bot shows to a person is in `src/attendee/copy.py`, grouped by flow. Change the wording there.
+Keep each `{placeholder}`. The tests fail if a placeholder is missing.
+
+## Archive old sessions
+
+A session's deadline cannot be after its session date.
+Seven days after the deadline, a session is archived, whatever its status. The bot stops showing it, and members can no longer respond.
+Archiving deletes nothing. Admins can still export the session with its responses and reasons.
+No command or cron job is needed: the bot works out the archive from the deadline each time it reads a session.
 
 ## Docker Compose
 

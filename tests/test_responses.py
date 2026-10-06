@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -29,7 +29,7 @@ from attendee.main import create_handlers
 from attendee.persistence.models import AttendanceSession, SessionResponse, SessionResponseEvent
 from attendee.telegram import messages
 from attendee.telegram.bootstrap import build_application
-from attendee.telegram.responses import PendingReason, ResponseHandlers
+from attendee.telegram.responses import CONFIRM_SECONDS, PendingReason, ResponseHandlers
 
 MEMBER_TG = 2002
 NOW = datetime(2026, 10, 6, 4, tzinfo=UTC)
@@ -138,14 +138,31 @@ async def test_checks_link_roster_and_open_status(attendance_club, open_session,
     assert await current(session_factory) == []
 
 
-async def test_deadline_does_not_block_open_session(open_session, session_factory):
+async def test_deadline_does_not_block_open_session(open_session, session_factory, archive_after):
     org, draft = open_session
-    after_deadline = datetime(2026, 12, 1, tzinfo=UTC)
-    assert draft.deadline < after_deadline
-    result = await ResponseService(session_factory).record(
-        org.id, MEMBER_TG, draft.id, ResponseStatus.COMING, now=after_deadline
+    service = ResponseService(session_factory)
+    # Up to ARCHIVE_AFTER past the deadline, an Open session takes responses.
+    last_moment = draft.deadline + archive_after
+    await service.check(org.id, MEMBER_TG, draft.id, last_moment)
+    result = await service.record(
+        org.id, MEMBER_TG, draft.id, ResponseStatus.COMING, now=last_moment
     )
     assert result.changed
+
+
+async def test_archived_session_blocks_responses_and_keeps_data(
+    open_session, session_factory, archive_after
+):
+    org, draft = open_session
+    service = ResponseService(session_factory)
+    await service.record(org.id, MEMBER_TG, draft.id, ResponseStatus.LATE, "Bus", NOW)
+    archived = draft.deadline + archive_after + timedelta(seconds=1)
+    with pytest.raises(SessionNotOpen):
+        await service.check(org.id, MEMBER_TG, draft.id, archived)
+    with pytest.raises(SessionNotOpen):
+        await service.record(org.id, MEMBER_TG, draft.id, ResponseStatus.COMING, now=archived)
+    # Archiving deletes nothing. The response stays for admin export.
+    assert await current(session_factory) == [("late", "Bus")]
 
 
 def bot_context():
@@ -169,7 +186,7 @@ async def test_coming_tap_records_with_private_popup(handlers, open_session, ses
     tap = group_tap(draft.id, "c")
     await handlers.tap(tap, bot_context())
     tap.callback_query.answer.assert_awaited_once_with(
-        "Attendance recorded: Coming", show_alert=True
+        messages.RECORDED.format(status="Coming"), show_alert=True
     )
     # Nothing goes to the group chat.
     assert replies(tap) == []
@@ -186,17 +203,90 @@ async def test_late_flow_from_tap_to_reason(handlers, open_session, session_fact
     assert await current(session_factory) == []
     start = message_update(MEMBER_TG, "sarah", text="/start reason")
     await handlers.start(start, bot_context())
-    assert replies(start) == [
-        (
-            "You selected Late for Patrons Day on 13 October 2026.\n\nPlease enter your reason.",
-            None,
-        )
-    ]
+    prompt = messages.REASON_PROMPT.format(status="Late", session="Patrons Day on 13 October 2026")
+    assert replies(start) == [(prompt, None)]
     text = message_update(MEMBER_TG, "sarah", text="Class ends at 7:30pm.")
     await handlers.reason(text, bot_context())
-    assert replies(text) == [("Attendance recorded: Late\nReason: Class ends at 7:30pm.", None)]
+    recorded = messages.RECORDED_REASON.format(status="Late", reason="Class ends at 7:30pm.")
+    assert replies(text) == [(recorded, None)]
     assert handlers.pending == {}
     assert await current(session_factory) == [("late", "Class ends at 7:30pm.")]
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clocked(open_session, session_factory):
+    org, _ = open_session
+    clock = FakeClock()
+    return ResponseHandlers(org.id, ResponseService(session_factory), clock), clock
+
+
+async def test_change_needs_second_tap(clocked, open_session, session_factory):
+    handlers, clock = clocked
+    _, draft = open_session
+    await handlers.tap(group_tap(draft.id, "c"), bot_context())
+    first = group_tap(draft.id, "l")
+    await handlers.tap(first, bot_context())
+    first.callback_query.answer.assert_awaited_once_with(
+        messages.CONFIRM_REPLACE.format(current="Coming", new="Late", seconds=CONFIRM_SECONDS),
+        show_alert=True,
+    )
+    # The first tap opens nothing and saves nothing.
+    assert handlers.pending == {}
+    assert await current(session_factory) == [("coming", None)]
+    clock.now += CONFIRM_SECONDS - 1
+    second = group_tap(draft.id, "l")
+    await handlers.tap(second, bot_context())
+    second.callback_query.answer.assert_awaited_once_with(
+        url="https://t.me/attendee_bot?start=reason"
+    )
+    assert handlers.pending == {MEMBER_TG: PendingReason(draft.id, ResponseStatus.LATE)}
+    assert handlers.armed == {}
+
+
+async def test_late_second_tap_or_other_button_arms_again(clocked, open_session, session_factory):
+    handlers, clock = clocked
+    org, draft = open_session
+    await ResponseService(session_factory).record(
+        org.id, MEMBER_TG, draft.id, ResponseStatus.LATE, "Bus"
+    )
+    await handlers.tap(group_tap(draft.id, "c"), bot_context())
+    clock.now += CONFIRM_SECONDS
+    expired = group_tap(draft.id, "c")
+    await handlers.tap(expired, bot_context())
+    assert "Tap Coming again" in expired.callback_query.answer.await_args.args[0]
+    # A different button replaces the armed change.
+    other = group_tap(draft.id, "n")
+    await handlers.tap(other, bot_context())
+    assert "Tap Not Coming again" in other.callback_query.answer.await_args.args[0]
+    coming = group_tap(draft.id, "c")
+    await handlers.tap(coming, bot_context())
+    assert "Tap Coming again" in coming.callback_query.answer.await_args.args[0]
+    confirm = group_tap(draft.id, "c")
+    await handlers.tap(confirm, bot_context())
+    confirm.callback_query.answer.assert_awaited_once_with(
+        messages.RECORDED.format(status="Coming"), show_alert=True
+    )
+    assert await current(session_factory) == [("coming", None)]
+
+
+async def test_same_status_tap_needs_no_confirmation(clocked, open_session, session_factory):
+    handlers, _ = clocked
+    _, draft = open_session
+    await handlers.tap(group_tap(draft.id, "c"), bot_context())
+    repeat = group_tap(draft.id, "c")
+    await handlers.tap(repeat, bot_context())
+    repeat.callback_query.answer.assert_awaited_once_with(
+        messages.RECORDED.format(status="Coming"), show_alert=True
+    )
+    assert handlers.armed == {}
 
 
 async def test_start_without_pending_tap(handlers):

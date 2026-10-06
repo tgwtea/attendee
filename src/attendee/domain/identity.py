@@ -3,6 +3,8 @@
 import re
 from enum import StrEnum
 
+from attendee import copy
+
 
 class MembershipRole(StrEnum):
     MEMBER = "member"
@@ -34,7 +36,5 @@ def normalize_handle(handle: str) -> str:
     """
     canonical = handle.strip().removeprefix("@").lower()
     if not _HANDLE.fullmatch(canonical):
-        raise ValueError(
-            "A Telegram handle has 4 to 32 letters, digits, or underscores and starts with a letter"
-        )
+        raise ValueError(copy.HANDLE_RULE)
     return canonical

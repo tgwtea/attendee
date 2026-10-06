@@ -130,7 +130,8 @@ class UploadHandlers:
             return
         preview = await self.imports.preview(self.organization_id, parsed)
         unresolved = await self.matching.list_unresolved(self.organization_id)
-        text = f"{format_preview(preview)}\nOpen unresolved account matches: {len(unresolved)}"
+        unresolved_line = messages.PREVIEW_UNRESOLVED.format(count=len(unresolved))
+        text = f"{format_preview(preview)}\n{unresolved_line}"
         if preview.rejected:
             self.pending.discard(user.id)
             text = f"{text}\n\n{messages.PREVIEW_REJECTED}"

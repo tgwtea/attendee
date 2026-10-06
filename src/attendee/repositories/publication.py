@@ -51,9 +51,9 @@ class PublicationRepository:
         return list(rows)
 
     async def drafts(
-        self, offset: int, limit: int
+        self, offset: int, limit: int, archive_cutoff: datetime
     ) -> list[tuple[AttendanceSession, SessionPublication | None]]:
-        """Draft sessions, newest date first, each with its active attempt if one exists."""
+        """Draft sessions that are not archived, newest date first, with any active attempt."""
         rows = await self.session.execute(
             select(AttendanceSession, SessionPublication)
             .outerjoin(
@@ -65,6 +65,7 @@ class PublicationRepository:
             .where(
                 AttendanceSession.organization_id == self.organization_id,
                 AttendanceSession.status == SessionStatus.DRAFT.value,
+                AttendanceSession.deadline >= archive_cutoff,
             )
             .order_by(AttendanceSession.session_date.desc(), AttendanceSession.id.desc())
             .offset(offset)

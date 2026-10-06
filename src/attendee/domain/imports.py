@@ -4,6 +4,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
 
+from attendee import copy
 from attendee.domain.identity import normalize_handle
 
 NAME = "Name"
@@ -60,12 +61,12 @@ def read_table(table: RawTable) -> ParsedFile:
             if cell.strip():
                 ignored.append(cell.strip())
         elif column in positions:
-            raise ImportFileError(f"The column {column!r} appears more than once")
+            raise ImportFileError(copy.FILE_DUPLICATE_COLUMN.format(column=column))
         else:
             positions[column] = position
     missing = [column for column in REQUIRED_COLUMNS if column not in positions]
     if missing:
-        raise ImportFileError(f"Missing required columns: {', '.join(missing)}")
+        raise ImportFileError(copy.FILE_MISSING_COLUMNS.format(columns=", ".join(missing)))
 
     rows: list[ImportRow] = []
     for line, cells in enumerate(table.rows, start=2):
@@ -76,7 +77,7 @@ def read_table(table: RawTable) -> ParsedFile:
         )
         rows.append(_read_row(line, name, handle, telegram_id))
     if not rows:
-        raise ImportFileError("The file has no member rows")
+        raise ImportFileError(copy.FILE_NO_ROWS)
     return ParsedFile(_reject_duplicates(rows), tuple(ignored))
 
 
@@ -87,17 +88,17 @@ def _cell(cells: tuple[str, ...], position: int | None) -> str:
 def _read_row(line: int, name: str, handle: str, telegram_id: str) -> ImportRow:
     errors: list[str] = []
     if not name:
-        errors.append("Missing name")
+        errors.append(copy.ROW_MISSING_NAME)
     elif len(name) > NAME_MAX_LENGTH:
-        errors.append(f"Name is longer than {NAME_MAX_LENGTH} characters")
+        errors.append(copy.ROW_NAME_TOO_LONG.format(limit=NAME_MAX_LENGTH))
     canonical: str | None = None
     if not handle:
-        errors.append("Missing Telegram handle")
+        errors.append(copy.ROW_MISSING_HANDLE)
     else:
         try:
             canonical = normalize_handle(handle)
         except ValueError as exc:
-            errors.append(f"Invalid Telegram handle {handle!r}: {exc}")
+            errors.append(copy.ROW_BAD_HANDLE.format(handle=handle, detail=exc))
     telegram_user_id: int | None = None
     if telegram_id:
         if (
@@ -107,7 +108,7 @@ def _read_row(line: int, name: str, handle: str, telegram_id: str) -> ImportRow:
         ):
             telegram_user_id = int(telegram_id)
         else:
-            errors.append(f"Invalid Telegram ID {telegram_id!r}")
+            errors.append(copy.ROW_BAD_TELEGRAM_ID.format(telegram_id=telegram_id))
     return ImportRow(line, name or None, canonical, telegram_user_id, tuple(errors))
 
 
@@ -124,11 +125,11 @@ def _reject_duplicates(rows: list[ImportRow]) -> tuple[ImportRow, ...]:
     for row in rows:
         errors = list(row.errors)
         for label, lines in (
-            ("handle", handles.get(row.telegram_handle or "", [])),
-            ("Telegram ID", telegram_ids.get(row.telegram_user_id or 0, [])),
+            (copy.ROW_DUPLICATE_HANDLE_LABEL, handles.get(row.telegram_handle or "", [])),
+            (copy.ROW_DUPLICATE_ID_LABEL, telegram_ids.get(row.telegram_user_id or 0, [])),
         ):
             if len(lines) > 1:
                 rows_text = ", ".join(str(line) for line in lines)
-                errors.append(f"Duplicate {label} in file (rows {rows_text})")
+                errors.append(copy.ROW_DUPLICATE.format(label=label, rows=rows_text))
         result.append(replace(row, errors=tuple(errors)))
     return tuple(result)

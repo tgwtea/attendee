@@ -17,13 +17,14 @@ from attendee.domain.identity import MembershipRole
 from attendee.main import create_handlers
 from attendee.persistence.models import AttendanceSeries, AttendanceSession, Membership
 from attendee.telegram.attendance import (
-    DENIED,
-    EXPIRED,
     AttendanceHandlers,
     Step,
     callback,
     parse_callback,
 )
+from attendee.telegram.messages import ALREADY_LINKED, DATE_FORMAT, DEADLINE_FORMAT, SESSION_FAILED
+from attendee.telegram.messages import SESSION_BUTTON_EXPIRED as EXPIRED
+from attendee.telegram.messages import SESSION_DENIED as DENIED
 
 
 @pytest.fixture
@@ -92,7 +93,7 @@ async def test_each_step_then_save_and_select_existing(flow, session_factory):
     message = await summary(flow, label="Tech Check")
     [(body, markup)] = replies(message)
     assert "Tech Check" in body and "2026-10-13" in body and "Asia/Singapore" in body
-    assert "Required members: 2" in body and "Status: Draft" in body
+    assert "Members on the list: 2" in body and "Status: Draft" in body
     assert all(len(data.encode()) <= 64 for _, data in buttons(markup))
     assert await counts(session_factory) == (0, 0)
     state, message = await press(flow, "y")
@@ -124,12 +125,12 @@ async def test_invalid_date_and_deadline_retry(flow):
     await press(flow, "n")
     await text(flow, "Practice")
     state, message = await text(flow, "2026-02-30")
-    assert state is None and "valid date" in replies(message)[0][0]
+    assert state is None and DATE_FORMAT in replies(message)[0][0]
     assert flow.pending[(1001, 1001)].step is Step.DATE
     await text(flow, "2026-10-13")
     await press(flow, "l")
     state, message = await text(flow, "tomorrow at eight")
-    assert state is None and "Use a date" in replies(message)[0][0]
+    assert state is None and DEADLINE_FORMAT in replies(message)[0][0]
     assert (await text(flow, "2020-01-01 20:00"))[0] == Step.CONFIRM
 
 
@@ -211,7 +212,7 @@ async def test_roster_change_and_duplicate_series_race(flow, attendance_club, se
     await summary(flow)
     await add_member(session_factory, org.id, "New member")
     state, message = await press(flow, "y")
-    assert state == Step.CONFIRM and "Required members: 3" in replies(message)[0][0]
+    assert state == Step.CONFIRM and "Members on the list: 3" in replies(message)[0][0]
     assert await counts(session_factory) == (0, 0)
     await service.create_series(org.id, admin.id, "Patrons Day")
     state, message = await press(flow, "y")
@@ -357,7 +358,7 @@ async def test_real_conversation_dispatch(session_factory, attendance_club):
         await click("Create new series")
         await send("Practice")
         await send("invalid")
-        assert "valid date" in transport.sent[-1]["text"]
+        assert DATE_FORMAT in transport.sent[-1]["text"]
         await send("2026-10-13")
         await click("Skip")
         await send("2026-10-12 20:00")
@@ -371,7 +372,7 @@ async def test_real_conversation_dispatch(session_factory, attendance_club):
         assert "Cancelled" in transport.sent[-1]["text"]
         # Existing onboarding remains reachable after a conversation ends.
         await send("/start")
-        assert "already linked" in transport.sent[-1]["text"]
+        assert transport.sent[-1]["text"] == ALREADY_LINKED
     assert errors == []
     assert await counts(session_factory) == (1, 1)
 
@@ -387,6 +388,6 @@ async def test_database_failure_ends_conversation_without_private_error(flow, mo
     monkeypatch.setattr(flow.attendance, "create_session", fail)
     state, message = await press(flow, "y")
     assert state == ConversationHandler.END
-    assert "operation failed" in replies(message)[0][0]
+    assert replies(message)[0][0] == SESSION_FAILED
     assert "SQL parameters" not in caplog.text
     assert not flow.pending

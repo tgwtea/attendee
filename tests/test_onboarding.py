@@ -68,7 +68,7 @@ async def test_confirmed_handle_match(handlers, club, session_factory):
     text, keyboard = await start(handlers, 555, "SarahLim")
     yes = match_callback(True, club.id, sarah.id)
     no = match_callback(False, club.id, sarah.id)
-    assert (text, keyboard) == ("Are you Sarah Lim?", [("Yes", yes), ("No", no)])
+    assert (text, keyboard) == (messages.confirm_name("Sarah Lim"), [("Yes", yes), ("No", no)])
     assert await telegram_id_of(session_factory, sarah.id) is None
     assert await press(handlers, 555, "SarahLim", yes) == (messages.LINKED, [])
     assert await telegram_id_of(session_factory, sarah.id) == 555

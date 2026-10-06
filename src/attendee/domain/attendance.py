@@ -1,9 +1,11 @@
 """Attendance names, explicit local dates, and read-time session status."""
 
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
+
+from attendee import copy
 
 
 class SessionStatus(StrEnum):
@@ -15,7 +17,7 @@ class SessionStatus(StrEnum):
 def clean_name(value: str) -> str:
     value = " ".join(value.split())
     if not value or len(value) > 200:
-        raise ValueError("Use 1 to 200 characters.")
+        raise ValueError(copy.NAME_LENGTH)
     return value
 
 
@@ -47,7 +49,7 @@ def parse_date(value: str) -> date:
             return date(int(match[3]), months.index(match[2].lower()) + 1, int(match[1]))
     except ValueError:
         pass
-    raise ValueError("Use YYYY-MM-DD or 12 Oct 2026 with a valid date.")
+    raise ValueError(copy.DATE_FORMAT)
 
 
 def parse_deadline(value: str, timezone: str) -> datetime:
@@ -55,17 +57,17 @@ def parse_deadline(value: str, timezone: str) -> datetime:
         r"(.+?)(?:,)?\s+(\d{1,2}):(\d{2})(?:\s+([AaPp][Mm]))?", value.strip(), re.ASCII
     )
     if not match:
-        raise ValueError("Use a date followed by HH:MM or 8:00 PM.")
+        raise ValueError(copy.DEADLINE_FORMAT)
     day = parse_date(match[1])
     hour, minute = int(match[2]), int(match[3])
     if match[4]:
         if not 1 <= hour <= 12:
-            raise ValueError("Use an hour from 1 to 12 with AM or PM.")
+            raise ValueError(copy.DEADLINE_HOUR)
         hour = hour % 12 + (12 if match[4].lower() == "pm" else 0)
     try:
         local = datetime(day.year, day.month, day.day, hour, minute)
     except ValueError as exc:
-        raise ValueError("Use a valid time.") from exc
+        raise ValueError(copy.DEADLINE_TIME) from exc
     zone = ZoneInfo(timezone)
     candidates = {
         local.replace(tzinfo=zone, fold=fold).astimezone(UTC)
@@ -77,11 +79,33 @@ def parse_deadline(value: str, timezone: str) -> datetime:
         == local
     }
     if len(candidates) != 1:
-        raise ValueError("This local time is ambiguous or does not exist. Choose another time.")
+        raise ValueError(copy.DEADLINE_AMBIGUOUS)
     return candidates.pop()
 
 
+def check_deadline(deadline: datetime, session_date: date, timezone: str) -> None:
+    """The deadline may fall at any time on the session date, but not later (decision T70)."""
+    if deadline.astimezone(ZoneInfo(timezone)).date() > session_date:
+        raise ValueError(copy.DEADLINE_AFTER_SESSION.format(session_date=session_date.isoformat()))
+
+
+# A session is archived this long after its deadline (decision T69).
+ARCHIVE_AFTER = timedelta(days=7)
+
+
+def archive_cutoff(now: datetime) -> datetime:
+    """A session whose deadline is earlier than this time is archived."""
+    return now - ARCHIVE_AFTER
+
+
+def is_archived(deadline: datetime, now: datetime) -> bool:
+    """Archived is derived at read time, like Deadline Passed. Nothing is stored or deleted."""
+    return deadline < archive_cutoff(now)
+
+
 def display_status(status: SessionStatus, deadline: datetime, now: datetime) -> str:
+    if is_archived(deadline, now):
+        return "Archived"
     if status is SessionStatus.OPEN and now > deadline:
         return "Deadline Passed"
     return status.value.title()

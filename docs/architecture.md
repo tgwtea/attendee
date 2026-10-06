@@ -332,4 +332,8 @@ A file lock prevents overlap within the backup directory. A temporary file becom
 Retention removes older command-owned backups after success and keeps the latest 14.
 Host cron calls the command daily. Restore remains a manual server operation.
 
+A session is archived 7 days after its deadline (decision T69). The archive is derived at read time from the deadline, like `Deadline Passed`. No job runs, and no data is deleted.
+
+`src/attendee/copy.py` holds every user-facing text (decision T71). `telegram/messages.py` re-exports it. Domain and application modules import it only for user-facing error texts.
+
 See `README.md` for commands and `docs/decisions.md` for deferred questions.

@@ -122,9 +122,9 @@ async def test_admin_of_another_organization_is_denied(handlers, club, session_f
 async def test_preview_then_apply(handlers, admin, club, session_factory, file_name, data):
     reply_list = await upload(handlers, file_name, data)
     text = "\n".join(text for text, _ in reply_list)
-    assert "Create: 2" in text
+    assert "New: 2" in text
     assert "Ignored columns: Section" in text
-    assert "Open unresolved account matches: 0" in text
+    assert messages.PREVIEW_UNRESOLVED.format(count=0) in text
     assert await member_count(session_factory, club.id) == 1
     apply, _ = apply_and_cancel(reply_list)
     assert await press(handlers, apply) == messages.APPLIED.format(
@@ -146,7 +146,7 @@ async def test_cancel_applies_nothing(handlers, admin, club, session_factory):
 async def test_rejected_preview_has_no_apply_button(handlers, admin):
     reply_list = await upload(handlers, "list.csv", b"Name,Telegram Handle\n,@nobody\n")
     text = "\n".join(text for text, _ in reply_list)
-    assert "reject row 2: Missing name" in text
+    assert "problem in row 2: the name is missing" in text
     assert messages.PREVIEW_REJECTED in text
     assert all(markup is None for _, markup in reply_list)
 
@@ -192,7 +192,7 @@ async def test_admin_role_is_checked_again_on_apply(handlers, admin, club, sessi
 async def test_duplicate_name_warning_in_upload(handlers, admin, club, session_factory):
     reply_list = await upload(handlers, "list.csv", b"Name,Telegram Handle\nadmin,@newadmin\n")
     text = "\n".join(text for text, _ in reply_list)
-    assert "warning row 2: an existing member is also named admin" in text
+    assert "check row 2: someone named admin is already on the list" in text
     apply_and_cancel(reply_list)
 
 
@@ -202,7 +202,7 @@ async def test_wrong_type_large_and_unreadable_files(handlers, admin):
         (messages.UPLOAD_TOO_LARGE.format(megabytes=5), None)
     ]
     [(text, markup)] = await upload(handlers, "list.csv", b"Nickname\nx\n")
-    assert text.startswith("The namelist could not be read: Missing required columns")
+    assert text.startswith(messages.UPLOAD_UNREADABLE.format(error="these columns are missing"))
     assert markup is None
 
 

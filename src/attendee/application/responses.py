@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from attendee.application.errors import ApplicationError
-from attendee.domain.attendance import SessionStatus
+from attendee.domain.attendance import SessionStatus, is_archived
 from attendee.domain.responses import ResponseStatus, clean_reason
 from attendee.persistence.database import write_session
 from attendee.persistence.models import AttendanceSession, SessionResponse, SessionResponseEvent
@@ -28,7 +28,7 @@ class NotOnRoster(ApplicationError):
 
 
 class SessionNotOpen(ApplicationError):
-    """The session is Draft, Closed, or not in this organization."""
+    """The session is Draft, Closed, archived, or not in this organization."""
 
 
 class ResponseTarget(BaseModel):
@@ -39,6 +39,8 @@ class ResponseTarget(BaseModel):
     series_name: str
     session_date: date
     label: str | None
+    # The saved response before this tap, for the replace confirmation (decision T68).
+    current_status: ResponseStatus | None = None
 
 
 class ResponseResult(BaseModel):
@@ -53,7 +55,12 @@ class ResponseService:
         self.session_factory = session_factory
 
     async def _target(
-        self, session: AsyncSession, organization_id: int, telegram_user_id: int, session_id: int
+        self,
+        session: AsyncSession,
+        organization_id: int,
+        telegram_user_id: int,
+        session_id: int,
+        now: datetime,
     ) -> tuple[int, AttendanceSession, ResponseTarget]:
         person = await PersonRepository(session).get_by_telegram_user_id(telegram_user_id)
         if person is None:
@@ -61,27 +68,35 @@ class ResponseService:
         attendance = AttendanceRepository(session, organization_id)
         row = await attendance.get_session(session_id)
         # A missed deadline does not block an Open session (PRD §7, decision T49).
-        if row is None or row.status != SessionStatus.OPEN:
+        # An archived session does (decision T69).
+        if row is None or row.status != SessionStatus.OPEN or is_archived(row.deadline, now):
             raise SessionNotOpen
-        if not await ResponseRepository(session, organization_id).on_roster(row.id, person.id):
+        responses = ResponseRepository(session, organization_id)
+        if not await responses.on_roster(row.id, person.id):
             raise NotOnRoster
         series = await attendance.series(row.series_id)
         assert series is not None
+        current = await responses.current(row.id, person.id)
         target = ResponseTarget(
             session_id=row.id,
             series_name=series.name,
             session_date=row.session_date,
             label=row.label,
+            current_status=None if current is None else ResponseStatus(current.status),
         )
         return person.id, row, target
 
     async def check(
-        self, organization_id: int, telegram_user_id: int, session_id: int
+        self,
+        organization_id: int,
+        telegram_user_id: int,
+        session_id: int,
+        now: datetime | None = None,
     ) -> ResponseTarget:
         """Raise NotLinked, SessionNotOpen, or NotOnRoster. Write nothing."""
         async with self.session_factory() as session:
             _, _, target = await self._target(
-                session, organization_id, telegram_user_id, session_id
+                session, organization_id, telegram_user_id, session_id, now or datetime.now(UTC)
             )
             return target
 
@@ -102,7 +117,7 @@ class ResponseService:
         now = now or datetime.now(UTC)
         async with write_session(self.session_factory) as session:
             person_id, row, _ = await self._target(
-                session, organization_id, telegram_user_id, session_id
+                session, organization_id, telegram_user_id, session_id, now
             )
             repository = ResponseRepository(session, organization_id)
             current = await repository.current(row.id, person_id)
